@@ -4,6 +4,7 @@ import { ThrottlerModule } from '@nestjs/throttler';
 import { SharedModule } from './shared/shared.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { UsersModule } from './users/users.module.js';
+import { HealthModule } from './health/health.module.js';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { UsersModule } from './users/users.module.js';
     SharedModule,
     AuthModule,
     UsersModule,
+    HealthModule,
   ],
 })
 export class AppModule {}
