@@ -1,12 +1,23 @@
 import { NestFactory } from '@nestjs/core';
-import { AppModule } from './app.module';
+import { AppModule } from './app.module.js';
 import { ValidationPipe } from '@nestjs/common';
+import { TransformInterceptor } from './common/index.js';
+import { SanitizeUserInterceptor } from './common/index.js';
+import { GlobalExceptionFilter } from './common/index.js';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
   app.setGlobalPrefix('api/v1');
 
+  app.useGlobalFilters(new GlobalExceptionFilter());
+
+  app.useGlobalInterceptors(
+    new TransformInterceptor(),
+    new SanitizeUserInterceptor(),
+  );
+
+  // Global validation
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
