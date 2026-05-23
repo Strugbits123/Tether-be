@@ -5,6 +5,8 @@ import { SharedModule } from './shared/shared.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { UsersModule } from './users/users.module.js';
 import { HealthModule } from './health/health.module.js';
+import { RecipientsModule } from './recipients/recipients.module.js';
+import { ReleaseManagersModule } from './release-managers/release-managers.module.js';
 
 @Module({
   imports: [
@@ -24,6 +26,8 @@ import { HealthModule } from './health/health.module.js';
     AuthModule,
     UsersModule,
     HealthModule,
+    RecipientsModule,
+    ReleaseManagersModule,
   ],
 })
 export class AppModule {}

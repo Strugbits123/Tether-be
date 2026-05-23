@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   Patch,
+  Post,
   Request,
   UseGuards,
 } from '@nestjs/common';
@@ -23,5 +24,25 @@ export class UsersController {
   @Patch('profile')
   async updateProfile(@Request() req: any, @Body() dto: UpdateProfileDto) {
     return this.usersService.updateProfile(req.user.id, dto);
+  }
+
+  @Post('onboarding/complete')
+  @UseGuards(JwtAuthGuard)
+  completeOnboarding(@Request() req: any) {
+    return this.usersService.completeOnboarding(req.user.id);
+  }
+
+  @Post('onboarding/purposes')
+  saveOnboardingPurposes(
+    @Request() req: any,
+    @Body('purposes') purposes: string[],
+  ) {
+    return this.usersService.saveOnboardingPurposes(req.user.id, purposes);
+  }
+
+  @Get('onboarding/state')
+  @UseGuards(JwtAuthGuard)
+  getOnboarding(@Request() req: any, @Body('purposes') purposes: string[]) {
+    return this.usersService.saveOnboardingPurposes(req.user.id, purposes);
   }
 }
