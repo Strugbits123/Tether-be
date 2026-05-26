@@ -1,3 +1,5 @@
+import './instrument.js';
+import * as Sentry from '@sentry/nestjs';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module.js';
 import { ValidationPipe } from '@nestjs/common';
@@ -27,9 +29,15 @@ async function bootstrap() {
   );
 
   app.enableCors({
-    origin: ['http://localhost:3000'],
+    origin: [
+      'http://localhost:3000',
+      'https://staging.jointether.com',
+      'https://jointether.com',
+    ],
     credentials: true,
   });
+
+  Sentry.setupConnectErrorHandler(app);
 
   const port = process.env.PORT ?? 3001;
   await app.listen(port);

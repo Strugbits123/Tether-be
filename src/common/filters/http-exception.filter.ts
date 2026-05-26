@@ -1,3 +1,4 @@
+import * as Sentry from '@sentry/nestjs';
 import {
   ExceptionFilter,
   Catch,
@@ -32,6 +33,7 @@ export class GlobalExceptionFilter implements ExceptionFilter {
         `${request.method} ${request.url} — ${status}`,
         exception instanceof Error ? exception.stack : String(exception),
       );
+      Sentry.captureException(exception);
     }
 
     response.status(status).json({
