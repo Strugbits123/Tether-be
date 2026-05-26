@@ -1,10 +1,33 @@
 import { Module } from '@nestjs/common';
-import { AppController } from './app.controller';
-import { AppService } from './app.service';
+import { ConfigModule } from '@nestjs/config';
+import { ThrottlerModule } from '@nestjs/throttler';
+import { SharedModule } from './shared/shared.module.js';
+import { AuthModule } from './auth/auth.module.js';
+import { UsersModule } from './users/users.module.js';
+import { HealthModule } from './health/health.module.js';
+import { RecipientsModule } from './recipients/recipients.module.js';
+import { ReleaseManagersModule } from './release-managers/release-managers.module.js';
 
 @Module({
-  imports: [],
-  controllers: [AppController],
-  providers: [AppService],
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: '.env',
+    }),
+    ThrottlerModule.forRoot({
+      throttlers: [
+        {
+          ttl: 60000,
+          limit: 100,
+        },
+      ],
+    }),
+    SharedModule,
+    AuthModule,
+    UsersModule,
+    HealthModule,
+    RecipientsModule,
+    ReleaseManagersModule,
+  ],
 })
 export class AppModule {}
