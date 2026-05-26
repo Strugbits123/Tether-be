@@ -103,6 +103,7 @@ export class UsersService {
       .single();
 
     if (error) {
+      console.error('completeOnboarding error:', JSON.stringify(error));
       throw new InternalServerErrorException('Failed to complete onboarding');
     }
 
