@@ -26,26 +26,25 @@ export class UsersService {
   }
 
   async updateProfile(userId: string, dto: UpdateProfileDto) {
-    const { data, error } = await this.supabase
+    const { error } = await this.supabase
       .getClient()
       .from('users')
       .update({
         ...dto,
         updated_at: new Date().toISOString(),
       })
-      .eq('id', userId)
-      .select()
-      .single();
+      .eq('id', userId);
 
     if (error) {
-      throw new NotFoundException('Failed to update profile');
+      throw new InternalServerErrorException('Failed to update profile');
     }
 
     if (dto.first_name && dto.last_name) {
       await this.completeOnboardingStep(userId, 'finish_account');
     }
 
-    return data;
+    // Fetch updated row separately
+    return this.getMe(userId);
   }
 
   async completeOnboardingStep(userId: string, step: string) {
@@ -84,7 +83,7 @@ export class UsersService {
   }
 
   async completeOnboarding(userId: string) {
-    const { data, error } = await this.supabase
+    const { error } = await this.supabase
       .getClient()
       .from('users')
       .update({
@@ -98,36 +97,36 @@ export class UsersService {
         },
         updated_at: new Date().toISOString(),
       })
-      .eq('id', userId)
-      .select()
-      .single();
+      .eq('id', userId);
 
     if (error) {
       console.error('completeOnboarding error:', JSON.stringify(error));
       throw new InternalServerErrorException('Failed to complete onboarding');
     }
 
-    return { message: 'Onboarding completed', user: data };
+    return { message: 'Onboarding completed' };
   }
 
   async saveOnboardingPurposes(userId: string, purposes: string[]) {
-    const { data, error } = await this.supabase
+    const currentOnboarding = await this.getOnboarding(userId);
+
+    const { error } = await this.supabase
       .getClient()
       .from('users')
       .update({
         onboarding: {
-          ...(await this.getOnboarding(userId)),
+          ...currentOnboarding,
           purposes,
         },
         updated_at: new Date().toISOString(),
       })
-      .eq('id', userId)
-      .select('onboarding')
-      .single();
+      .eq('id', userId);
 
-    if (error)
+    if (error) {
       throw new InternalServerErrorException('Failed to save purposes');
-    return data;
+    }
+
+    return { message: 'Purposes saved' };
   }
 
   private async getOnboarding(userId: string) {
