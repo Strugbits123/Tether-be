@@ -5,10 +5,15 @@ import {
   InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
+import { ImageMimeType } from './dto/avatar-upload.dto.js';
+import { ActivityService } from '../activity/activity.service.js';
 
 @Injectable()
 export class UsersService {
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly activityService: ActivityService,
+  ) {}
 
   async getMe(userId: string) {
     const { data, error } = await this.supabase
@@ -40,7 +45,21 @@ export class UsersService {
     }
 
     if (dto.first_name && dto.last_name) {
+      const { data: currentUser } = await this.supabase
+        .getClient()
+        .from('users')
+        .select('onboarding')
+        .eq('id', userId)
+        .single();
+      const wasCompleted =
+        (currentUser?.onboarding as Record<string, unknown> | null)
+          ?.finish_account === true;
+
       await this.completeOnboardingStep(userId, 'finish_account');
+
+      if (!wasCompleted) {
+        this.activityService.log(userId, 'profile_completed', 'Profile completed', {});
+      }
     }
 
     // Fetch updated row separately
@@ -105,6 +124,32 @@ export class UsersService {
     }
 
     return { message: 'Onboarding completed' };
+  }
+
+  async getAvatarUploadUrl(userId: string, fileType: ImageMimeType) {
+    const rawExt = fileType.split('/')[1];
+    const ext = rawExt === 'jpeg' ? 'jpg' : rawExt;
+    const storagePath = `${userId}/avatar.${ext}`;
+
+    const { data, error } = await this.supabase
+      .getClient()
+      .storage.from('avatars')
+      .createSignedUploadUrl(storagePath, { upsert: true });
+
+    if (error) {
+      throw new InternalServerErrorException('Failed to generate upload URL');
+    }
+
+    const { data: publicUrlData } = this.supabase
+      .getClient()
+      .storage.from('avatars')
+      .getPublicUrl(storagePath);
+
+    return {
+      signedUploadUrl: data.signedUrl,
+      storagePath,
+      publicUrl: publicUrlData.publicUrl,
+    };
   }
 
   async saveOnboardingPurposes(userId: string, purposes: string[]) {

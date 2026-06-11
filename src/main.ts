@@ -8,7 +8,7 @@ import { SanitizeUserInterceptor } from './common/index.js';
 import { GlobalExceptionFilter } from './common/index.js';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { rawBody: true });
 
   app.setGlobalPrefix('api/v1');
 
