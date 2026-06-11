@@ -1,27 +1,34 @@
 import {
+  ConflictException,
   Injectable,
-  BadRequestException,
   InternalServerErrorException,
-  NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
 import { CreateReleaseManagerDto } from './dto/create-release-manager.dto.js';
+import { ActivityService } from '../activity/activity.service.js';
 
 @Injectable()
 export class ReleaseManagersService {
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly activityService: ActivityService,
+  ) {}
 
-  async designate(userId: string, dto: CreateReleaseManagerDto) {
-    const { data: existingRecipient } = await this.supabase
+  // POST /release-managers
+  async create(userId: string, dto: CreateReleaseManagerDto) {
+    const name = `${dto.firstName.trim()} ${dto.lastName.trim()}`;
+    const email = dto.email.toLowerCase();
+
+    const { data: recipientConflict } = await this.supabase
       .getClient()
       .from('recipients')
       .select('id')
       .eq('user_id', userId)
-      .eq('email', dto.email)
+      .eq('email', email)
       .maybeSingle();
 
-    if (existingRecipient) {
-      throw new BadRequestException(
+    if (recipientConflict) {
+      throw new ConflictException(
         'This person is already a recipient on your account. A Release Manager cannot also be a recipient.',
       );
     }
@@ -29,7 +36,11 @@ export class ReleaseManagersService {
     await this.supabase
       .getClient()
       .from('release_managers')
-      .update({ status: 'revoked', revoked_at: new Date().toISOString() })
+      .update({
+        status: 'revoked',
+        revoked_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
       .eq('user_id', userId)
       .not('status', 'in', '("revoked","declined")');
 
@@ -38,45 +49,58 @@ export class ReleaseManagersService {
       .from('release_managers')
       .insert({
         user_id: userId,
-        name: dto.name,
-        email: dto.email,
+        name,
+        email,
+        phone: dto.phone ?? null,
         relationship: dto.relationship,
+        note: dto.note ?? null,
         status: 'invited',
-        invitation_sent_at: new Date().toISOString(),
-        invitation_expires_at: new Date(
-          Date.now() + 7 * 24 * 60 * 60 * 1000,
-        ).toISOString(),
       })
-      .select()
+      .select('id, name, email, phone, relationship, note, status, created_at')
       .single();
 
     if (error) {
       throw new InternalServerErrorException(
-        'Failed to designate Release Manager',
+        'Failed to designate Release Manager.',
       );
     }
 
-    await this.markOnboardingStep(userId, 'add_release_manager');
+    await this.markOnboardingStep(userId, 'add_release_manager').catch(
+      () => null,
+    );
+
+    this.activityService.log(userId, 'release_manager_designated', `Release Manager designated — ${name}`, {
+      releaseManagerId: data.id,
+      name,
+      email,
+      relationship: dto.relationship,
+    });
 
     return data;
   }
 
+  // GET /release-managers
   async getActive(userId: string) {
     const { data, error } = await this.supabase
       .getClient()
       .from('release_managers')
-      .select('*')
+      .select('id, name, email, phone, relationship, note, status, created_at')
       .eq('user_id', userId)
       .not('status', 'in', '("revoked","declined")')
       .maybeSingle();
 
-    if (error)
-      throw new InternalServerErrorException('Failed to fetch Release Manager');
-    if (!data)
-      throw new NotFoundException('No active Release Manager designated');
-    return data;
+    if (error) {
+      throw new InternalServerErrorException(
+        'Failed to fetch Release Manager.',
+      );
+    }
+
+    return data; // null if none designated — caller decides how to render
   }
 
+  // -------------------------------------------------------------------------
+  // Private helpers
+  // -------------------------------------------------------------------------
   private async markOnboardingStep(userId: string, step: string) {
     const { data: user } = await this.supabase
       .getClient()
@@ -87,10 +111,7 @@ export class ReleaseManagersService {
 
     if (!user) return;
 
-    const onboarding = user.onboarding as Record<
-      string,
-      boolean | string | null
-    >;
+    const onboarding = (user.onboarding as Record<string, unknown>) ?? {};
     onboarding[step] = true;
 
     await this.supabase
