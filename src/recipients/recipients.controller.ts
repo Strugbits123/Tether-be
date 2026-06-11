@@ -1,34 +1,29 @@
 import {
   Body,
   Controller,
-  Delete,
   Get,
-  Param,
   Post,
   Request,
   UseGuards,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import { RecipientsService } from './recipients.service.js';
 import { CreateRecipientDto } from './dto/create-recipient.dto.js';
+import { RecipientsService } from './recipients.service.js';
 
 @Controller('recipients')
 @UseGuards(JwtAuthGuard)
 export class RecipientsController {
   constructor(private readonly recipientsService: RecipientsService) {}
 
+  // POST /api/v1/recipients
   @Post()
-  create(@Request() req: any, @Body() dto: CreateRecipientDto) {
+  async create(@Request() req: any, @Body() dto: CreateRecipientDto) {
     return this.recipientsService.create(req.user.id, dto);
   }
 
+  // GET /api/v1/recipients
   @Get()
-  findAll(@Request() req: any) {
+  async findAll(@Request() req: any) {
     return this.recipientsService.findAll(req.user.id);
-  }
-
-  @Delete(':id')
-  remove(@Request() req: any, @Param('id') id: string) {
-    return this.recipientsService.remove(req.user.id, id);
   }
 }

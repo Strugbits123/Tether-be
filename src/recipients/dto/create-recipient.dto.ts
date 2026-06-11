@@ -1,30 +1,45 @@
 import {
   IsEmail,
-  IsString,
+  IsEnum,
+  IsNotEmpty,
   IsOptional,
-  IsBoolean,
-  IsDateString,
+  IsString,
+  MaxLength,
 } from 'class-validator';
 
+export enum RelationshipType {
+  FAMILY = 'family',
+  FRIEND = 'friend',
+  PARTNER = 'partner',
+  COLLEAGUE = 'colleague',
+  OTHER = 'other',
+}
+
 export class CreateRecipientDto {
+  @IsNotEmpty()
   @IsString()
-  name: string;
+  @MaxLength(100)
+  firstName: string;
+
+  @IsNotEmpty()
+  @IsString()
+  @MaxLength(100)
+  lastName: string;
 
   @IsEmail()
   email: string;
 
+  @IsOptional()
   @IsString()
-  relationship: string;
+  @MaxLength(30)
+  phone?: string;
 
-  @IsBoolean()
-  @IsOptional()
-  is_minor?: boolean;
+  @IsNotEmpty()
+  @IsEnum(RelationshipType)
+  relationship: RelationshipType;
 
-  @IsDateString()
   @IsOptional()
-  date_of_birth?: string;
-
-  @IsEmail()
-  @IsOptional()
-  custodial_adult_email?: string;
+  @IsString()
+  @MaxLength(500)
+  note?: string;
 }
