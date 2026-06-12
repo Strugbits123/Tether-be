@@ -238,7 +238,9 @@ export class MessagesService {
       .from('messages')
       .update({
         processing_status: 'ready',
-        duration_seconds: dto.durationSeconds,
+        // 0 means the browser couldn't measure duration; store NULL to satisfy
+        // the messages_duration_seconds_check constraint (which rejects 0).
+        duration_seconds: dto.durationSeconds || null,
         file_size_bytes: dto.fileSizeBytes,
         updated_at: new Date().toISOString(),
       })
@@ -247,6 +249,7 @@ export class MessagesService {
       .single();
 
     if (error || !updated) {
+      console.error('Error confirming audio upload:', JSON.stringify(error));
       throw new InternalServerErrorException('Failed to confirm upload');
     }
 
