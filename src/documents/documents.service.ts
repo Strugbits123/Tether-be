@@ -163,7 +163,7 @@ export class DocumentsService {
       throw new InternalServerErrorException('Failed to delete document');
     }
 
-    return { success: true };
+    return { message: 'Document deleted' };
   }
 
   private async requireOwnedDocument(userId: string, documentId: string) {

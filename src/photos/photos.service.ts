@@ -201,7 +201,7 @@ export class PhotosService {
       throw new InternalServerErrorException('Failed to delete photo');
     }
 
-    return { success: true };
+    return { message: 'Photo deleted' };
   }
 
   private async markOnboardingAddPhotos(userId: string) {

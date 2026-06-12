@@ -102,18 +102,28 @@ export class UsersService {
   }
 
   async completeOnboarding(userId: string) {
+    // Only stamp completed_at — preserve the real per-step flags, which are set
+    // individually when a recipient/release manager/photo/message is created.
+    // Skipped steps must stay false.
+    const { data: user, error: fetchError } = await this.supabase
+      .getClient()
+      .from('users')
+      .select('onboarding')
+      .eq('id', userId)
+      .single();
+
+    if (fetchError || !user) {
+      throw new NotFoundException('User not found');
+    }
+
+    const onboarding = (user.onboarding as Record<string, unknown>) ?? {};
+    onboarding['completed_at'] = new Date().toISOString();
+
     const { error } = await this.supabase
       .getClient()
       .from('users')
       .update({
-        onboarding: {
-          finish_account: true,
-          add_release_manager: true,
-          add_recipients: true,
-          add_photos: true,
-          create_message: true,
-          completed_at: new Date().toISOString(),
-        },
+        onboarding,
         updated_at: new Date().toISOString(),
       })
       .eq('id', userId);
@@ -172,6 +182,21 @@ export class UsersService {
     }
 
     return { message: 'Purposes saved' };
+  }
+
+  async getOnboardingState(userId: string) {
+    const { data, error } = await this.supabase
+      .getClient()
+      .from('users')
+      .select('onboarding')
+      .eq('id', userId)
+      .single();
+
+    if (error || !data) {
+      throw new NotFoundException('User not found');
+    }
+
+    return { onboarding: data.onboarding ?? {} };
   }
 
   private async getOnboarding(userId: string) {
