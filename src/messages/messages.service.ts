@@ -28,7 +28,10 @@ const AUDIO_MIME_TO_EXT: Record<string, string> = {
 };
 
 function stripHtmlTags(html: string): string {
-  return html.replace(/<[^>]*>/g, ' ').replace(/\s{2,}/g, ' ').trim();
+  return html
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
 }
 
 @Injectable()
@@ -82,11 +85,16 @@ export class MessagesService {
 
     await this.createAssignments(userId, message.id, dto.assignments);
     this.markOnboardingCreateMessage(userId).catch(() => null);
-    this.activityService.log(userId, 'message_created', `"${dto.title}" written`, {
-      messageId: message.id,
-      type: 'text',
-      title: dto.title,
-    });
+    this.activityService.log(
+      userId,
+      'message_created',
+      `"${dto.title}" written`,
+      {
+        messageId: message.id,
+        type: 'text',
+        title: dto.title,
+      },
+    );
     return message;
   }
 
@@ -133,11 +141,16 @@ export class MessagesService {
 
     await this.createAssignments(userId, message.id, dto.assignments);
     this.markOnboardingCreateMessage(userId).catch(() => null);
-    this.activityService.log(userId, 'message_created', `Video message "${dto.title}" started`, {
-      messageId: message.id,
-      type: 'video',
-      title: dto.title,
-    });
+    this.activityService.log(
+      userId,
+      'message_created',
+      `Video message "${dto.title}" started`,
+      {
+        messageId: message.id,
+        type: 'video',
+        title: dto.title,
+      },
+    );
 
     return {
       messageId: message.id,
@@ -158,6 +171,7 @@ export class MessagesService {
       .createSignedUploadUrl(storagePath);
 
     if (urlError) {
+      console.error('Error creating audio upload URL:', urlError);
       throw new InternalServerErrorException(
         'Failed to generate audio upload URL',
       );
@@ -188,11 +202,16 @@ export class MessagesService {
 
     await this.createAssignments(userId, message.id, dto.assignments);
     this.markOnboardingCreateMessage(userId).catch(() => null);
-    this.activityService.log(userId, 'message_created', `Audio message "${dto.title}" started`, {
-      messageId: message.id,
-      type: 'audio',
-      title: dto.title,
-    });
+    this.activityService.log(
+      userId,
+      'message_created',
+      `Audio message "${dto.title}" started`,
+      {
+        messageId: message.id,
+        type: 'audio',
+        title: dto.title,
+      },
+    );
 
     return {
       messageId: message.id,
@@ -203,7 +222,11 @@ export class MessagesService {
 
   // ─── Confirm audio upload ──────────────────────────────────────────────────
 
-  async confirmUpload(userId: string, messageId: string, dto: ConfirmUploadDto) {
+  async confirmUpload(
+    userId: string,
+    messageId: string,
+    dto: ConfirmUploadDto,
+  ) {
     const message = await this.requireOwnedMessage(userId, messageId);
 
     if (message.type !== 'audio' || message.processing_status !== 'uploading') {
@@ -246,9 +269,7 @@ export class MessagesService {
       throw new InternalServerErrorException('Failed to fetch messages');
     }
 
-    return Promise.all(
-      (data ?? []).map((m) => this.attachAudioUrl(m, 3600)),
-    );
+    return Promise.all((data ?? []).map((m) => this.attachAudioUrl(m, 3600)));
   }
 
   // ─── Single message ────────────────────────────────────────────────────────
@@ -285,7 +306,9 @@ export class MessagesService {
     const signingKey = this.config.get<string>('MUX_SIGNING_KEY');
     const privateKey = this.config.get<string>('MUX_PRIVATE_KEY');
     if (!signingKey || !privateKey) {
-      throw new ServiceUnavailableException('Video playback signing not configured');
+      throw new ServiceUnavailableException(
+        'Video playback signing not configured',
+      );
     }
 
     const mux = this.getMuxClient();
@@ -296,7 +319,9 @@ export class MessagesService {
         expiration: '1h',
       });
     } catch {
-      throw new InternalServerErrorException('Failed to generate playback token');
+      throw new InternalServerErrorException(
+        'Failed to generate playback token',
+      );
     }
 
     return { token, playbackId: message.mux_playback_id };
@@ -325,7 +350,11 @@ export class MessagesService {
 
   // ─── Update message ────────────────────────────────────────────────────────
 
-  async updateMessage(userId: string, messageId: string, dto: UpdateMessageDto) {
+  async updateMessage(
+    userId: string,
+    messageId: string,
+    dto: UpdateMessageDto,
+  ) {
     await this.requireOwnedMessage(userId, messageId);
 
     const updates: Record<string, unknown> = {
@@ -375,7 +404,7 @@ export class MessagesService {
         .eq('id', item.messageId)
         .eq('user_id', userId);
     }
-    return { success: true };
+    return { message: 'Messages reordered' };
   }
 
   // ─── Delete message ────────────────────────────────────────────────────────
@@ -409,7 +438,7 @@ export class MessagesService {
       throw new InternalServerErrorException('Failed to delete message');
     }
 
-    return { success: true };
+    return { message: 'Message deleted' };
   }
 
   // ─── Mux webhook handlers ──────────────────────────────────────────────────
@@ -481,7 +510,11 @@ export class MessagesService {
         model: 'nova-2',
         smart_format: true,
       });
-      const r = response as unknown as { results?: { channels?: Array<{ alternatives?: Array<{ transcript?: string }> }> } };
+      const r = response as unknown as {
+        results?: {
+          channels?: Array<{ alternatives?: Array<{ transcript?: string }> }>;
+        };
+      };
       const transcript =
         r?.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? null;
 
@@ -523,7 +556,11 @@ export class MessagesService {
         model: 'nova-2',
         smart_format: true,
       });
-      const r = response as unknown as { results?: { channels?: Array<{ alternatives?: Array<{ transcript?: string }> }> } };
+      const r = response as unknown as {
+        results?: {
+          channels?: Array<{ alternatives?: Array<{ transcript?: string }> }>;
+        };
+      };
       const transcript =
         r?.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? null;
 
@@ -562,7 +599,8 @@ export class MessagesService {
       .single();
 
     if (error || !message) throw new NotFoundException('Message not found');
-    if (message.user_id !== userId) throw new ForbiddenException('Not your message');
+    if (message.user_id !== userId)
+      throw new ForbiddenException('Not your message');
     return message;
   }
 
@@ -584,7 +622,8 @@ export class MessagesService {
           content_id: messageId,
           assignment_scope: a.scope,
           group_value: a.scope === 'group' ? (a.groupValue ?? null) : null,
-          recipient_id: a.scope === 'individual' ? (a.recipientId ?? null) : null,
+          recipient_id:
+            a.scope === 'individual' ? (a.recipientId ?? null) : null,
         });
 
       if (error) {
@@ -593,10 +632,7 @@ export class MessagesService {
     }
   }
 
-  private async attachAudioUrl(
-    message: Record<string, unknown>,
-    ttl: number,
-  ) {
+  private async attachAudioUrl(message: Record<string, unknown>, ttl: number) {
     if (message.type === 'audio' && message.storage_path) {
       const { data } = await this.supabase
         .getClient()

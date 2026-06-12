@@ -50,17 +50,23 @@ export class RecipientsService {
       .single();
 
     if (error) {
+      console.error('Error inserting recipient:', error);
       throw new InternalServerErrorException('Failed to add recipient.');
     }
 
     await this.markOnboardingStep(userId, 'add_recipients').catch(() => null);
 
-    this.activityService.log(userId, 'recipient_added', `${name} added as recipient`, {
-      recipientId: data.id,
-      name,
-      email: dto.email,
-      relationship: dto.relationship,
-    });
+    this.activityService.log(
+      userId,
+      'recipient_added',
+      `${name} added as recipient`,
+      {
+        recipientId: data.id,
+        name,
+        email: dto.email,
+        relationship: dto.relationship,
+      },
+    );
 
     return data;
   }

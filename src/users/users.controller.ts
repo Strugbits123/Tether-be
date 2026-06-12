@@ -11,6 +11,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { UsersService } from './users.service.js';
 import { UpdateProfileDto } from './dto/update-profile.dto.js';
 import { AvatarUploadDto } from './dto/avatar-upload.dto.js';
+import { SaveOnboardingPurposesDto } from './dto/save-onboarding-purposes.dto.js';
 
 @Controller('users')
 @UseGuards(JwtAuthGuard)
@@ -33,7 +34,6 @@ export class UsersController {
   }
 
   @Post('onboarding/complete')
-  @UseGuards(JwtAuthGuard)
   completeOnboarding(@Request() req: any) {
     return this.usersService.completeOnboarding(req.user.id);
   }
@@ -41,14 +41,13 @@ export class UsersController {
   @Post('onboarding/purposes')
   saveOnboardingPurposes(
     @Request() req: any,
-    @Body('purposes') purposes: string[],
+    @Body() dto: SaveOnboardingPurposesDto,
   ) {
-    return this.usersService.saveOnboardingPurposes(req.user.id, purposes);
+    return this.usersService.saveOnboardingPurposes(req.user.id, dto.purposes);
   }
 
   @Get('onboarding/state')
-  @UseGuards(JwtAuthGuard)
-  getOnboarding(@Request() req: any, @Body('purposes') purposes: string[]) {
-    return this.usersService.saveOnboardingPurposes(req.user.id, purposes);
+  getOnboardingState(@Request() req: any) {
+    return this.usersService.getOnboardingState(req.user.id);
   }
 }
