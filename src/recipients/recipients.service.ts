@@ -1,28 +1,35 @@
 import {
+  ConflictException,
   Injectable,
-  BadRequestException,
   InternalServerErrorException,
 } from '@nestjs/common';
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
 import { CreateRecipientDto } from './dto/create-recipient.dto.js';
+import { ActivityService } from '../activity/activity.service.js';
 
 @Injectable()
 export class RecipientsService {
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly activityService: ActivityService,
+  ) {}
 
+  // POST /recipients
   async create(userId: string, dto: CreateRecipientDto) {
-    const { data: existingRM } = await this.supabase
+    const name = `${dto.firstName.trim()} ${dto.lastName.trim()}`;
+
+    // Check for duplicate email on this account
+    const { data: existing } = await this.supabase
       .getClient()
-      .from('release_managers')
+      .from('recipients')
       .select('id')
       .eq('user_id', userId)
-      .eq('email', dto.email)
-      .not('status', 'in', '("revoked","declined")')
+      .eq('email', dto.email.toLowerCase())
       .maybeSingle();
 
-    if (existingRM) {
-      throw new BadRequestException(
-        'This person is already your Release Manager. A recipient cannot also be the Release Manager.',
+    if (existing) {
+      throw new ConflictException(
+        'A recipient with this email address already exists on your account.',
       );
     }
 
@@ -31,56 +38,60 @@ export class RecipientsService {
       .from('recipients')
       .insert({
         user_id: userId,
-        name: dto.name,
-        email: dto.email,
+        name,
+        email: dto.email.toLowerCase(),
+        phone: dto.phone ?? null,
         relationship: dto.relationship,
-        is_minor: dto.is_minor ?? false,
-        date_of_birth: dto.date_of_birth ?? null,
-        custodial_adult_email: dto.custodial_adult_email ?? null,
+        note: dto.note ?? null,
       })
-      .select()
+      .select(
+        'id, name, email, phone, relationship, note, invitation_status, access_code, created_at',
+      )
       .single();
 
     if (error) {
-      if (error.code === '23505') {
-        throw new BadRequestException(
-          'This person is already a recipient on your account.',
-        );
-      }
-      throw new InternalServerErrorException('Failed to add recipient');
+      console.error('Error inserting recipient:', error);
+      throw new InternalServerErrorException('Failed to add recipient.');
     }
 
-    await this.markOnboardingStep(userId, 'add_recipients');
+    await this.markOnboardingStep(userId, 'add_recipients').catch(() => null);
+
+    this.activityService.log(
+      userId,
+      'recipient_added',
+      `${name} added as recipient`,
+      {
+        recipientId: data.id,
+        name,
+        email: dto.email,
+        relationship: dto.relationship,
+      },
+    );
 
     return data;
   }
 
+  // GET /recipients
   async findAll(userId: string) {
     const { data, error } = await this.supabase
       .getClient()
       .from('recipients')
-      .select('*')
+      .select(
+        'id, name, email, phone, relationship, note, invitation_status, created_at',
+      )
       .eq('user_id', userId)
       .order('created_at', { ascending: true });
 
-    if (error)
-      throw new InternalServerErrorException('Failed to fetch recipients');
-    return data;
+    if (error) {
+      throw new InternalServerErrorException('Failed to fetch recipients.');
+    }
+
+    return data ?? [];
   }
 
-  async remove(userId: string, recipientId: string) {
-    const { error } = await this.supabase
-      .getClient()
-      .from('recipients')
-      .delete()
-      .eq('id', recipientId)
-      .eq('user_id', userId);
-
-    if (error)
-      throw new InternalServerErrorException('Failed to remove recipient');
-    return { message: 'Recipient removed' };
-  }
-
+  // -------------------------------------------------------------------------
+  // Private helpers
+  // -------------------------------------------------------------------------
   private async markOnboardingStep(userId: string, step: string) {
     const { data: user } = await this.supabase
       .getClient()
@@ -91,10 +102,7 @@ export class RecipientsService {
 
     if (!user) return;
 
-    const onboarding = user.onboarding as Record<
-      string,
-      boolean | string | null
-    >;
+    const onboarding = (user.onboarding as Record<string, unknown>) ?? {};
     onboarding[step] = true;
 
     await this.supabase
