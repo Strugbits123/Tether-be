@@ -1,6 +1,7 @@
 import {
   Injectable,
   BadRequestException,
+  ConflictException,
   UnauthorizedException,
   InternalServerErrorException,
 } from '@nestjs/common';
@@ -20,27 +21,34 @@ export class AuthService {
   ) {}
 
   async signup(dto: SignupDto) {
-    const { data, error } = await this.supabase
-      .getClient()
-      .auth.admin.createUser({
-        email: dto.email,
-        password: dto.password,
-        email_confirm: false,
-      });
+    const { data, error } = await this.supabase.getPublicClient().auth.signUp({
+      email: dto.email,
+      password: dto.password,
+      options: {
+        emailRedirectTo: `${this.config.get('FRONTEND_URL')}/auth/callback`,
+      },
+    });
 
     if (error) {
-      if (error.message.includes('already registered')) {
-        throw new BadRequestException(
-          'An account with this email already exists',
-        );
-      }
-      throw new InternalServerErrorException(error.message);
+      throw new BadRequestException(error.message);
+    }
+
+    // Supabase returns a fake success for existing emails (anti-enumeration).
+    // A genuine new signup has a populated identities array; a duplicate has
+    // an empty one. Short-circuit here before any downstream user-row creation.
+    if (
+      data.user &&
+      (!data.user.identities || data.user.identities.length === 0)
+    ) {
+      throw new ConflictException(
+        'An account with this email already exists. Please sign in or reset your password.',
+      );
     }
 
     return {
       message:
         'Account created. Please check your email to verify your account.',
-      user_id: data.user.id,
+      user_id: data.user?.id ?? null,
     };
   }
 

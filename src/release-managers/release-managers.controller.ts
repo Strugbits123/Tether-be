@@ -7,23 +7,23 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
-import { ReleaseManagersService } from './release-managers.service.js';
 import { CreateReleaseManagerDto } from './dto/create-release-manager.dto.js';
+import { ReleaseManagersService } from './release-managers.service.js';
 
 @Controller('release-managers')
 @UseGuards(JwtAuthGuard)
 export class ReleaseManagersController {
-  constructor(
-    private readonly releaseManagersService: ReleaseManagersService,
-  ) {}
+  constructor(private readonly rmService: ReleaseManagersService) {}
 
+  // POST /api/v1/release-managers
   @Post()
-  designate(@Request() req: any, @Body() dto: CreateReleaseManagerDto) {
-    return this.releaseManagersService.designate(req.user.id, dto);
+  async create(@Request() req: any, @Body() dto: CreateReleaseManagerDto) {
+    return this.rmService.create(req.user.id, dto);
   }
 
-  @Get('active')
-  getActive(@Request() req: any) {
-    return this.releaseManagersService.getActive(req.user.id);
+  // GET /api/v1/release-managers
+  @Get()
+  async getActive(@Request() req: any) {
+    return this.rmService.getActive(req.user.id);
   }
 }

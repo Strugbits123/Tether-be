@@ -14,6 +14,7 @@ import { LoginDto } from './dto/login.dto.js';
 import { MagicLinkDto } from './dto/magic-link.dto.js';
 import { ResetPasswordDto } from './dto/reset-password.dto.js';
 import { UpdatePasswordDto } from './dto/update-password.dto.js';
+import { RefreshTokenDto } from './dto/refresh-token.dto.js';
 
 @Controller('auth')
 @UseGuards(ThrottlerGuard)
@@ -48,8 +49,8 @@ export class AuthController {
 
   @Post('refresh')
   @Throttle({ default: { limit: 10, ttl: 60000 } })
-  refresh(@Body('refresh_token') refreshToken: string) {
-    return this.authService.refreshToken(refreshToken);
+  refresh(@Body() dto: RefreshTokenDto) {
+    return this.authService.refreshToken(dto.refresh_token);
   }
 
   @Get('google')
