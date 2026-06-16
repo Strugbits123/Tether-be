@@ -46,8 +46,13 @@ export class DocumentItemDto {
     'digital_accounts',
     'personal',
     'military',
+    'other',
   ])
   category?: string;
+
+  @IsOptional()
+  @IsString()
+  mimeType?: string;
 }
 
 export class CreateDocumentsBatchDto {
