@@ -21,6 +21,29 @@ export class AuthService {
   ) {}
 
   async signup(dto: SignupDto) {
+    // Pre-flight: check if this email already has a row in public.users.
+    // This catches cases where a Google-OAuth user later attempts an
+    // email/password signup, which can bypass the identities-array check
+    // and trigger a second DB row via the handle_new_user trigger.
+    // Wrapped in try/catch so a transient query failure never blocks signup.
+    try {
+      const { data: existingUser } = await this.supabase
+        .getClient()
+        .from('users')
+        .select('id')
+        .eq('email', dto.email.toLowerCase())
+        .maybeSingle();
+
+      if (existingUser) {
+        throw new ConflictException(
+          'An account with this email already exists. Please sign in or reset your password.',
+        );
+      }
+    } catch (e) {
+      if (e instanceof ConflictException) throw e;
+      // Transient DB error — proceed and let Supabase auth be the authority.
+    }
+
     const { data, error } = await this.supabase.getPublicClient().auth.signUp({
       email: dto.email,
       password: dto.password,
@@ -30,6 +53,11 @@ export class AuthService {
     });
 
     if (error) {
+      if (error.message.toLowerCase().includes('already registered')) {
+        throw new ConflictException(
+          'An account with this email already exists. Please sign in or reset your password.',
+        );
+      }
       throw new BadRequestException(error.message);
     }
 
