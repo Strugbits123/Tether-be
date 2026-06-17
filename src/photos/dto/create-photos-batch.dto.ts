@@ -35,6 +35,11 @@ export class PhotoItemDto {
   @IsOptional()
   @IsInt()
   height?: number | null;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  title?: string | null;
 }
 
 export class AssignmentDto {
@@ -62,6 +67,10 @@ export class CreatePhotosBatchDto {
   @IsString()
   @MaxLength(2000)
   caption?: string | null;
+
+  @IsOptional()
+  @IsUUID()
+  folderId?: string | null;
 
   @IsArray()
   @ValidateNested({ each: true })
