@@ -146,7 +146,7 @@ export class PhotosService {
       .order('display_order', { ascending: true })
       .order('created_at', { ascending: false });
 
-    if (folderId === 'uncategorized') {
+    if (folderId === 'uncategorized' || folderId === 'null') {
       query = query.is('folder_id', null);
     } else if (folderId) {
       query = query.eq('folder_id', folderId);
