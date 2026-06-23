@@ -1,5 +1,6 @@
 import { UpdateProfileDto } from './dto/update-profile.dto.js';
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
+import { PostHogService } from '../shared/posthog/posthog.service.js';
 import {
   Injectable,
   InternalServerErrorException,
@@ -13,6 +14,7 @@ export class UsersService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly activityService: ActivityService,
+    private readonly posthog: PostHogService,
   ) {}
 
   async getMe(userId: string) {
@@ -59,6 +61,15 @@ export class UsersService {
 
       if (!wasCompleted) {
         this.activityService.log(userId, 'profile_completed', 'Profile completed', {});
+        this.posthog.capture(userId, 'server_profile_completed', {
+          has_avatar: !!dto.avatar_url,
+        });
+        this.posthog.identify(userId, {
+          first_name: dto.first_name,
+          last_name: dto.last_name,
+          state: dto.state,
+          age_group: dto.age_group,
+        });
       }
     }
 

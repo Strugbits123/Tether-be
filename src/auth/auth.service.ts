@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
+import { PostHogService } from '../shared/posthog/posthog.service.js';
 import { SignupDto } from './dto/signup.dto.js';
 import { LoginDto } from './dto/login.dto.js';
 import { MagicLinkDto } from './dto/magic-link.dto.js';
@@ -18,6 +19,7 @@ export class AuthService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly config: ConfigService,
+    private readonly posthog: PostHogService,
   ) {}
 
   async signup(dto: SignupDto) {
@@ -71,6 +73,17 @@ export class AuthService {
       throw new ConflictException(
         'An account with this email already exists. Please sign in or reset your password.',
       );
+    }
+
+    if (data.user?.id) {
+      this.posthog.capture(data.user.id, 'server_user_signed_up', {
+        email: data.user.email,
+        provider: 'email',
+      });
+      this.posthog.identify(data.user.id, {
+        email: data.user.email,
+        created_at: new Date().toISOString(),
+      });
     }
 
     return {

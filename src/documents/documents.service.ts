@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
 import { ActivityService } from '../activity/activity.service.js';
+import { PostHogService } from '../shared/posthog/posthog.service.js';
 import { DocumentFileDescriptorDto } from './dto/request-upload-urls.dto.js';
 import { AssignmentDto } from './dto/assignment.dto.js';
 import { CreateDocumentsBatchDto, DocumentItemDto } from './dto/create-documents-batch.dto.js';
@@ -37,6 +38,7 @@ export class DocumentsService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly activityService: ActivityService,
+    private readonly posthog: PostHogService,
   ) {}
 
   async getUploadUrls(userId: string, files: DocumentFileDescriptorDto[]) {
@@ -108,6 +110,11 @@ export class DocumentsService {
 
       createdDocuments.push(created);
     }
+
+    this.posthog.capture(userId, 'server_documents_uploaded', {
+      count: createdDocuments.length,
+      categories: createdDocuments.map((d) => (d as Record<string, unknown>).category),
+    });
 
     return { count: createdDocuments.length, documents: createdDocuments };
   }

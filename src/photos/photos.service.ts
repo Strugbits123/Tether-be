@@ -6,6 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
+import { PostHogService } from '../shared/posthog/posthog.service.js';
 import { FileDescriptorDto } from './dto/request-upload-urls.dto.js';
 import { AssignmentDto, CreatePhotosBatchDto } from './dto/create-photos-batch.dto.js';
 import { ActivityService } from '../activity/activity.service.js';
@@ -26,6 +27,7 @@ export class PhotosService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly activityService: ActivityService,
+    private readonly posthog: PostHogService,
   ) {}
 
   async getUploadUrls(userId: string, files: FileDescriptorDto[]) {
@@ -123,6 +125,10 @@ export class PhotosService {
     }
 
     this.markOnboardingAddPhotos(userId).catch(() => null);
+    this.posthog.capture(userId, 'server_photos_uploaded', {
+      count: createdPhotos.length,
+      folder_id: dto.folderId ?? 'uncategorized',
+    });
 
     this.activityService.log(
       userId,

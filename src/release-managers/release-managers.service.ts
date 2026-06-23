@@ -6,12 +6,14 @@ import {
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
 import { CreateReleaseManagerDto } from './dto/create-release-manager.dto.js';
 import { ActivityService } from '../activity/activity.service.js';
+import { PostHogService } from '../shared/posthog/posthog.service.js';
 
 @Injectable()
 export class ReleaseManagersService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly activityService: ActivityService,
+    private readonly posthog: PostHogService,
   ) {}
 
   // POST /release-managers
@@ -73,6 +75,9 @@ export class ReleaseManagersService {
       releaseManagerId: data.id,
       name,
       email,
+      relationship: dto.relationship,
+    });
+    this.posthog.capture(userId, 'server_release_manager_designated', {
       relationship: dto.relationship,
     });
 

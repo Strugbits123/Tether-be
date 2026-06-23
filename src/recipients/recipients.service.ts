@@ -6,12 +6,14 @@ import {
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
 import { CreateRecipientDto } from './dto/create-recipient.dto.js';
 import { ActivityService } from '../activity/activity.service.js';
+import { PostHogService } from '../shared/posthog/posthog.service.js';
 
 @Injectable()
 export class RecipientsService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly activityService: ActivityService,
+    private readonly posthog: PostHogService,
   ) {}
 
   // POST /recipients
@@ -67,6 +69,9 @@ export class RecipientsService {
         relationship: dto.relationship,
       },
     );
+    this.posthog.capture(userId, 'server_recipient_added', {
+      relationship: dto.relationship,
+    });
 
     return data;
   }

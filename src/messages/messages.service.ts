@@ -10,6 +10,7 @@ import { ConfigService } from '@nestjs/config';
 import Mux from '@mux/mux-node';
 import { DeepgramClient } from '@deepgram/sdk';
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
+import { PostHogService } from '../shared/posthog/posthog.service.js';
 import { AssignmentDto } from './dto/assignment.dto.js';
 import { CreateTextMessageDto } from './dto/create-text-message.dto.js';
 import { CreateVideoMessageDto } from './dto/create-video-message.dto.js';
@@ -40,6 +41,7 @@ export class MessagesService {
     private readonly supabase: SupabaseService,
     private readonly config: ConfigService,
     private readonly activityService: ActivityService,
+    private readonly posthog: PostHogService,
   ) {}
 
   private getMuxClient(): Mux {
@@ -95,6 +97,7 @@ export class MessagesService {
         title: dto.title,
       },
     );
+    this.posthog.capture(userId, 'server_message_created', { type: 'text', title: dto.title });
     return message;
   }
 
@@ -151,6 +154,7 @@ export class MessagesService {
         title: dto.title,
       },
     );
+    this.posthog.capture(userId, 'server_message_created', { type: 'video', title: dto.title });
 
     return {
       messageId: message.id,
@@ -212,6 +216,7 @@ export class MessagesService {
         title: dto.title,
       },
     );
+    this.posthog.capture(userId, 'server_message_created', { type: 'audio', title: dto.title });
 
     return {
       messageId: message.id,
@@ -477,6 +482,11 @@ export class MessagesService {
     if (playbackId) {
       this.transcribeVideo(message.id, playbackId).catch(() => null);
     }
+
+    this.posthog.capture(message.user_id, 'server_video_processed', {
+      messageId: message.id,
+      duration_seconds: Math.round((event.data as Record<string, unknown>).duration as number ?? 0),
+    });
   }
 
   async handleMuxAssetErrored(event: Record<string, unknown>) {
