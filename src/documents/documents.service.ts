@@ -10,12 +10,16 @@ import { ActivityService } from '../activity/activity.service.js';
 import { PostHogService } from '../shared/posthog/posthog.service.js';
 import { DocumentFileDescriptorDto } from './dto/request-upload-urls.dto.js';
 import { AssignmentDto } from './dto/assignment.dto.js';
-import { CreateDocumentsBatchDto, DocumentItemDto } from './dto/create-documents-batch.dto.js';
+import {
+  CreateDocumentsBatchDto,
+  DocumentItemDto,
+} from './dto/create-documents-batch.dto.js';
 import { UpdateDocumentDto } from './dto/update-document.dto.js';
 
 const MIME_TO_EXT: Record<string, string> = {
   'application/pdf': 'pdf',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+    'docx',
   'image/jpeg': 'jpg',
   'image/png': 'png',
   'image/heic': 'heic',
@@ -101,19 +105,25 @@ export class DocumentsService {
         .single();
 
       if (error || !created) {
-        throw new InternalServerErrorException('Failed to save document record');
+        throw new InternalServerErrorException(
+          'Failed to save document record',
+        );
       }
 
       await this.createAssignments(userId, created.id, dto.assignments);
 
-      this.logUploadActivity(userId, created.id, title, category, doc).catch(() => null);
+      this.logUploadActivity(userId, created.id, title, category, doc).catch(
+        () => null,
+      );
 
       createdDocuments.push(created);
     }
 
     this.posthog.capture(userId, 'server_documents_uploaded', {
       count: createdDocuments.length,
-      categories: createdDocuments.map((d) => (d as Record<string, unknown>).category),
+      categories: createdDocuments.map(
+        (d) => (d as Record<string, unknown>).category,
+      ),
     });
 
     return { count: createdDocuments.length, documents: createdDocuments };
@@ -146,10 +156,19 @@ export class DocumentsService {
       .eq('user_id', userId);
 
     if (mimeError) {
-      throw new InternalServerErrorException('Failed to fetch document file type stats');
+      throw new InternalServerErrorException(
+        'Failed to fetch document file type stats',
+      );
     }
 
-    const fileTypes = { total: 0, documents: 0, audio: 0, video: 0, images: 0, other: 0 };
+    const fileTypes = {
+      total: 0,
+      documents: 0,
+      audio: 0,
+      video: 0,
+      images: 0,
+      other: 0,
+    };
     for (const row of mimeRows ?? []) {
       const mime: string = row.mime_type ?? '';
       fileTypes.total++;
@@ -193,7 +212,9 @@ export class DocumentsService {
         .not('mime_type', 'like', 'image/%');
     }
 
-    const { data, error } = await query.order('created_at', { ascending: false });
+    const { data, error } = await query.order('created_at', {
+      ascending: false,
+    });
 
     if (error) {
       throw new InternalServerErrorException('Failed to fetch documents');
@@ -213,7 +234,10 @@ export class DocumentsService {
 
     const assignmentMap = new Map<string, number>();
     for (const a of assignments ?? []) {
-      assignmentMap.set(a.content_id, (assignmentMap.get(a.content_id) ?? 0) + 1);
+      assignmentMap.set(
+        a.content_id,
+        (assignmentMap.get(a.content_id) ?? 0) + 1,
+      );
     }
 
     return Promise.all(
@@ -253,7 +277,11 @@ export class DocumentsService {
     };
   }
 
-  async updateDocument(userId: string, documentId: string, dto: UpdateDocumentDto) {
+  async updateDocument(
+    userId: string,
+    documentId: string,
+    dto: UpdateDocumentDto,
+  ) {
     const doc = await this.requireOwnedDocument(userId, documentId);
 
     const updates: Record<string, unknown> = {
@@ -288,11 +316,16 @@ export class DocumentsService {
 
     if (dto.category !== undefined && dto.category !== doc.category) {
       this.activityService
-        .log(userId, 'document_updated', `Document category changed to ${dto.category}`, {
-          documentId,
-          oldCategory: doc.category,
-          newCategory: dto.category,
-        })
+        .log(
+          userId,
+          'document_updated',
+          `Document category changed to ${dto.category}`,
+          {
+            documentId,
+            oldCategory: doc.category,
+            newCategory: dto.category,
+          },
+        )
         .catch(() => null);
     }
 
@@ -350,7 +383,8 @@ export class DocumentsService {
       .single();
 
     if (error || !data) throw new NotFoundException('Document not found');
-    if (data.user_id !== userId) throw new ForbiddenException('Not your document');
+    if (data.user_id !== userId)
+      throw new ForbiddenException('Not your document');
     return data;
   }
 
@@ -372,7 +406,8 @@ export class DocumentsService {
           content_id: documentId,
           assignment_scope: a.scope,
           group_value: a.scope === 'group' ? (a.groupValue ?? null) : null,
-          recipient_id: a.scope === 'individual' ? (a.recipientId ?? null) : null,
+          recipient_id:
+            a.scope === 'individual' ? (a.recipientId ?? null) : null,
         });
 
       if (error) {

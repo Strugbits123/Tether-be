@@ -8,7 +8,10 @@ import {
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
 import { PostHogService } from '../shared/posthog/posthog.service.js';
 import { FileDescriptorDto } from './dto/request-upload-urls.dto.js';
-import { AssignmentDto, CreatePhotosBatchDto } from './dto/create-photos-batch.dto.js';
+import {
+  AssignmentDto,
+  CreatePhotosBatchDto,
+} from './dto/create-photos-batch.dto.js';
 import { ActivityService } from '../activity/activity.service.js';
 import { CreateFolderDto } from './dto/create-folder.dto.js';
 import { UpdateFolderDto } from './dto/update-folder.dto.js';
@@ -107,7 +110,9 @@ export class PhotosService {
             content_id: createdPhoto.id,
             assignment_scope: assignment.scope,
             group_value:
-              assignment.scope === 'group' ? (assignment.groupValue ?? null) : null,
+              assignment.scope === 'group'
+                ? (assignment.groupValue ?? null)
+                : null,
             recipient_id:
               assignment.scope === 'individual'
                 ? (assignment.recipientId ?? null)
@@ -254,7 +259,9 @@ export class PhotosService {
             content_id: photoId,
             assignment_scope: assignment.scope,
             group_value:
-              assignment.scope === 'group' ? (assignment.groupValue ?? null) : null,
+              assignment.scope === 'group'
+                ? (assignment.groupValue ?? null)
+                : null,
             recipient_id:
               assignment.scope === 'individual'
                 ? (assignment.recipientId ?? null)
@@ -306,7 +313,10 @@ export class PhotosService {
     const { data: updated, error: updateError } = await this.supabase
       .getClient()
       .from('photos')
-      .update({ folder_id: dto.folderId ?? null, updated_at: new Date().toISOString() })
+      .update({
+        folder_id: dto.folderId ?? null,
+        updated_at: new Date().toISOString(),
+      })
       .eq('id', photoId)
       .select()
       .single();
@@ -416,7 +426,9 @@ export class PhotosService {
           content_id: folder.id,
           assignment_scope: assignment.scope,
           group_value:
-            assignment.scope === 'group' ? (assignment.groupValue ?? null) : null,
+            assignment.scope === 'group'
+              ? (assignment.groupValue ?? null)
+              : null,
           recipient_id:
             assignment.scope === 'individual'
               ? (assignment.recipientId ?? null)
@@ -424,7 +436,9 @@ export class PhotosService {
         });
 
       if (assignError) {
-        throw new InternalServerErrorException('Failed to save folder assignment');
+        throw new InternalServerErrorException(
+          'Failed to save folder assignment',
+        );
       }
     }
 
@@ -469,7 +483,10 @@ export class PhotosService {
       .eq('user_id', userId)
       .is('folder_id', null);
 
-    return { folders: foldersWithCounts, uncategorizedCount: uncategorizedCount ?? 0 };
+    return {
+      folders: foldersWithCounts,
+      uncategorizedCount: uncategorizedCount ?? 0,
+    };
   }
 
   async updateFolder(userId: string, folderId: string, dto: UpdateFolderDto) {
