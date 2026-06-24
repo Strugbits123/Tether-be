@@ -18,6 +18,7 @@ import {
 export class PhotoItemDto {
   @IsString()
   @IsNotEmpty()
+  @MaxLength(500)
   storagePath: string;
 
   @IsIn(['jpeg', 'jpg', 'png', 'heic', 'webp'])
@@ -30,10 +31,14 @@ export class PhotoItemDto {
 
   @IsOptional()
   @IsInt()
+  @Min(1)
+  @Max(20000)
   width?: number | null;
 
   @IsOptional()
   @IsInt()
+  @Min(1)
+  @Max(20000)
   height?: number | null;
 
   @IsOptional()

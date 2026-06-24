@@ -47,7 +47,7 @@ export class RecipientsService {
         note: dto.note ?? null,
       })
       .select(
-        'id, name, email, phone, relationship, note, invitation_status, access_code, created_at',
+        'id, name, email, phone, relationship, note, invitation_status, created_at',
       )
       .single();
 

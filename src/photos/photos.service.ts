@@ -1,6 +1,5 @@
 import { randomUUID } from 'crypto';
 import {
-  ForbiddenException,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
@@ -169,35 +168,29 @@ export class PhotosService {
       throw new InternalServerErrorException('Failed to fetch photos');
     }
 
-    const photos = await Promise.all(
-      (data ?? []).map(async (photo) => {
-        const { data: urlData } = await this.supabase
-          .getClient()
-          .storage.from('photos')
-          .createSignedUrl(photo.storage_path, 3600);
+    const rows = data ?? [];
+    if (rows.length === 0) return [];
 
-        return { ...photo, signedUrl: urlData?.signedUrl ?? null };
-      }),
+    const { data: urlResults } = await this.supabase
+      .getClient()
+      .storage.from('photos')
+      .createSignedUrls(
+        rows.map((p) => p.storage_path),
+        3600,
+      );
+
+    const urlMap = new Map(
+      (urlResults ?? []).map((r) => [r.path, r.signedUrl]),
     );
 
-    return photos;
+    return rows.map((photo) => ({
+      ...photo,
+      signedUrl: urlMap.get(photo.storage_path) ?? null,
+    }));
   }
 
   async getPhoto(userId: string, photoId: string) {
-    const { data: photo, error } = await this.supabase
-      .getClient()
-      .from('photos')
-      .select('*')
-      .eq('id', photoId)
-      .single();
-
-    if (error || !photo) {
-      throw new NotFoundException('Photo not found');
-    }
-
-    if (photo.user_id !== userId) {
-      throw new ForbiddenException('Not your photo');
-    }
+    const photo = await this.requireOwnedPhoto(userId, photoId);
 
     const { data: urlData } = await this.supabase
       .getClient()
@@ -208,20 +201,7 @@ export class PhotosService {
   }
 
   async updatePhoto(userId: string, photoId: string, dto: UpdatePhotoDto) {
-    const { data: photo, error: fetchError } = await this.supabase
-      .getClient()
-      .from('photos')
-      .select('*')
-      .eq('id', photoId)
-      .single();
-
-    if (fetchError || !photo) {
-      throw new NotFoundException('Photo not found');
-    }
-
-    if (photo.user_id !== userId) {
-      throw new ForbiddenException('Not your photo');
-    }
+    await this.requireOwnedPhoto(userId, photoId);
 
     const updates: Record<string, unknown> = {
       updated_at: new Date().toISOString(),
@@ -278,35 +258,19 @@ export class PhotosService {
   }
 
   async movePhoto(userId: string, photoId: string, dto: MovePhotoDto) {
-    const { data: photo, error: fetchError } = await this.supabase
-      .getClient()
-      .from('photos')
-      .select('*')
-      .eq('id', photoId)
-      .single();
-
-    if (fetchError || !photo) {
-      throw new NotFoundException('Photo not found');
-    }
-
-    if (photo.user_id !== userId) {
-      throw new ForbiddenException('Not your photo');
-    }
+    await this.requireOwnedPhoto(userId, photoId);
 
     if (dto.folderId) {
       const { data: folder, error: folderError } = await this.supabase
         .getClient()
         .from('photo_folders')
-        .select('id, user_id')
+        .select('id')
         .eq('id', dto.folderId)
+        .eq('user_id', userId)
         .single();
 
       if (folderError || !folder) {
         throw new NotFoundException('Folder not found');
-      }
-
-      if (folder.user_id !== userId) {
-        throw new ForbiddenException('Not your folder');
       }
     }
 
@@ -329,20 +293,7 @@ export class PhotosService {
   }
 
   async getDownloadUrl(userId: string, photoId: string) {
-    const { data: photo, error } = await this.supabase
-      .getClient()
-      .from('photos')
-      .select('*')
-      .eq('id', photoId)
-      .single();
-
-    if (error || !photo) {
-      throw new NotFoundException('Photo not found');
-    }
-
-    if (photo.user_id !== userId) {
-      throw new ForbiddenException('Not your photo');
-    }
+    const photo = await this.requireOwnedPhoto(userId, photoId);
 
     const { data: urlData, error: urlError } = await this.supabase
       .getClient()
@@ -359,20 +310,7 @@ export class PhotosService {
   }
 
   async deletePhoto(userId: string, photoId: string) {
-    const { data: photo, error: fetchError } = await this.supabase
-      .getClient()
-      .from('photos')
-      .select('*')
-      .eq('id', photoId)
-      .single();
-
-    if (fetchError || !photo) {
-      throw new NotFoundException('Photo not found');
-    }
-
-    if (photo.user_id !== userId) {
-      throw new ForbiddenException('Not your photo');
-    }
+    const photo = await this.requireOwnedPhoto(userId, photoId);
 
     await this.supabase
       .getClient()
@@ -490,20 +428,7 @@ export class PhotosService {
   }
 
   async updateFolder(userId: string, folderId: string, dto: UpdateFolderDto) {
-    const { data: folder, error: fetchError } = await this.supabase
-      .getClient()
-      .from('photo_folders')
-      .select('*')
-      .eq('id', folderId)
-      .single();
-
-    if (fetchError || !folder) {
-      throw new NotFoundException('Folder not found');
-    }
-
-    if (folder.user_id !== userId) {
-      throw new ForbiddenException('Not your folder');
-    }
+    await this.requireOwnedFolder(userId, folderId);
 
     const { data: updated, error: updateError } = await this.supabase
       .getClient()
@@ -521,20 +446,7 @@ export class PhotosService {
   }
 
   async deleteFolder(userId: string, folderId: string) {
-    const { data: folder, error: fetchError } = await this.supabase
-      .getClient()
-      .from('photo_folders')
-      .select('*')
-      .eq('id', folderId)
-      .single();
-
-    if (fetchError || !folder) {
-      throw new NotFoundException('Folder not found');
-    }
-
-    if (folder.user_id !== userId) {
-      throw new ForbiddenException('Not your folder');
-    }
+    await this.requireOwnedFolder(userId, folderId);
 
     await this.supabase
       .getClient()
@@ -553,6 +465,30 @@ export class PhotosService {
     }
 
     return { success: true };
+  }
+
+  private async requireOwnedPhoto(userId: string, photoId: string) {
+    const { data: photo, error } = await this.supabase
+      .getClient()
+      .from('photos')
+      .select('*')
+      .eq('id', photoId)
+      .eq('user_id', userId)
+      .single();
+    if (error || !photo) throw new NotFoundException('Photo not found');
+    return photo;
+  }
+
+  private async requireOwnedFolder(userId: string, folderId: string) {
+    const { data: folder, error } = await this.supabase
+      .getClient()
+      .from('photo_folders')
+      .select('id, user_id, name')
+      .eq('id', folderId)
+      .eq('user_id', userId)
+      .single();
+    if (error || !folder) throw new NotFoundException('Folder not found');
+    return folder;
   }
 
   private async markOnboardingAddPhotos(userId: string) {

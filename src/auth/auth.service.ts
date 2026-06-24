@@ -51,6 +51,10 @@ export class AuthService {
       password: dto.password,
       options: {
         emailRedirectTo: `${this.config.get('FRONTEND_URL')}/auth/callback`,
+        data: {
+          first_name: dto.first_name ?? null,
+          last_name: dto.last_name ?? null,
+        },
       },
     });
 
@@ -90,6 +94,13 @@ export class AuthService {
       message:
         'Account created. Please check your email to verify your account.',
       user_id: data.user?.id ?? null,
+      session: data.session
+        ? {
+            access_token: data.session.access_token,
+            refresh_token: data.session.refresh_token,
+            expires_at: data.session.expires_at,
+          }
+        : null,
     };
   }
 

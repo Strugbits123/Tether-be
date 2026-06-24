@@ -1,4 +1,3 @@
-import { randomUUID } from 'crypto';
 import {
   ForbiddenException,
   Injectable,
@@ -13,20 +12,10 @@ import { SupabaseService } from '../shared/supabase/supabase.service.js';
 import { PostHogService } from '../shared/posthog/posthog.service.js';
 import { AssignmentDto } from './dto/assignment.dto.js';
 import { CreateTextMessageDto } from './dto/create-text-message.dto.js';
-import { CreateVideoMessageDto } from './dto/create-video-message.dto.js';
-import { CreateAudioMessageDto } from './dto/create-audio-message.dto.js';
 import { ConfirmUploadDto } from './dto/confirm-upload.dto.js';
 import { UpdateMessageDto } from './dto/update-message.dto.js';
 import { ReorderMessagesDto } from './dto/reorder-messages.dto.js';
 import { ActivityService } from '../activity/activity.service.js';
-
-const AUDIO_MIME_TO_EXT: Record<string, string> = {
-  'audio/webm': 'webm',
-  'audio/mp4': 'm4a',
-  'audio/wav': 'wav',
-  'audio/mpeg': 'mp3',
-  'audio/ogg': 'ogg',
-};
 
 function stripHtmlTags(html: string): string {
   return html
@@ -101,128 +90,6 @@ export class MessagesService {
     return message;
   }
 
-  // ─── Video message ─────────────────────────────────────────────────────────
-
-  async createVideoUploadUrl(userId: string, dto: CreateVideoMessageDto) {
-    const mux = this.getMuxClient();
-    const frontendUrl =
-      this.config.get<string>('FRONTEND_URL') ?? 'http://localhost:3000';
-
-    let upload: Awaited<ReturnType<typeof mux.video.uploads.create>>;
-    try {
-      upload = await mux.video.uploads.create({
-        new_asset_settings: {
-          playback_policy: ['signed'],
-          encoding_tier: 'baseline',
-        },
-        cors_origin: frontendUrl,
-      });
-    } catch {
-      throw new InternalServerErrorException('Failed to create Mux upload');
-    }
-
-    const { data: message, error } = await this.supabase
-      .getClient()
-      .from('messages')
-      .insert({
-        user_id: userId,
-        type: 'video',
-        source: 'browser',
-        title: dto.title,
-        notes: dto.notes ?? null,
-        mux_upload_id: upload.id,
-        processing_status: 'uploading',
-        transcription_status: 'pending',
-        display_order: 0,
-      })
-      .select()
-      .single();
-
-    if (error || !message) {
-      throw new InternalServerErrorException('Failed to create message record');
-    }
-
-    await this.createAssignments(userId, message.id, dto.assignments);
-    this.markOnboardingCreateMessage(userId).catch(() => null);
-    this.activityService.log(
-      userId,
-      'message_created',
-      `Video message "${dto.title}" started`,
-      {
-        messageId: message.id,
-        type: 'video',
-        title: dto.title,
-      },
-    );
-    this.posthog.capture(userId, 'server_message_created', { type: 'video', title: dto.title });
-
-    return {
-      messageId: message.id,
-      uploadUrl: upload.url,
-      muxUploadId: upload.id,
-    };
-  }
-
-  // ─── Audio message ─────────────────────────────────────────────────────────
-
-  async createAudioUploadUrl(userId: string, dto: CreateAudioMessageDto) {
-    const ext = AUDIO_MIME_TO_EXT[dto.fileType] ?? 'webm';
-    const storagePath = `${userId}/${randomUUID()}.${ext}`;
-
-    const { data, error: urlError } = await this.supabase
-      .getClient()
-      .storage.from('audio')
-      .createSignedUploadUrl(storagePath);
-
-    if (urlError) {
-      throw new InternalServerErrorException(
-        'Failed to generate audio upload URL',
-      );
-    }
-
-    const { data: message, error } = await this.supabase
-      .getClient()
-      .from('messages')
-      .insert({
-        user_id: userId,
-        type: 'audio',
-        source: 'browser',
-        title: dto.title,
-        notes: dto.notes ?? null,
-        storage_path: storagePath,
-        mime_type: dto.fileType,
-        processing_status: 'uploading',
-        transcription_status: 'pending',
-        display_order: 0,
-      })
-      .select()
-      .single();
-
-    if (error || !message) {
-      throw new InternalServerErrorException('Failed to create message record');
-    }
-
-    await this.createAssignments(userId, message.id, dto.assignments);
-    this.markOnboardingCreateMessage(userId).catch(() => null);
-    this.activityService.log(
-      userId,
-      'message_created',
-      `Audio message "${dto.title}" started`,
-      {
-        messageId: message.id,
-        type: 'audio',
-        title: dto.title,
-      },
-    );
-    this.posthog.capture(userId, 'server_message_created', { type: 'audio', title: dto.title });
-
-    return {
-      messageId: message.id,
-      signedUploadUrl: data.signedUrl,
-      storagePath,
-    };
-  }
-
   // ─── Confirm audio upload ──────────────────────────────────────────────────
 
   async confirmUpload(
@@ -265,7 +132,9 @@ export class MessagesService {
     const { data, error } = await this.supabase
       .getClient()
       .from('messages')
-      .select('*')
+      .select(
+        'id, user_id, type, title, notes, body, processing_status, transcription_status, transcript, duration_seconds, file_size_bytes, display_order, created_at, updated_at',
+      )
       .eq('user_id', userId)
       .order('display_order', { ascending: true })
       .order('created_at', { ascending: false });
@@ -274,7 +143,7 @@ export class MessagesService {
       throw new InternalServerErrorException('Failed to fetch messages');
     }
 
-    return Promise.all((data ?? []).map((m) => this.attachAudioUrl(m, 3600)));
+    return data ?? [];
   }
 
   // ─── Single message ────────────────────────────────────────────────────────
@@ -458,7 +327,7 @@ export class MessagesService {
     const { data: message } = await this.supabase
       .getClient()
       .from('messages')
-      .select('*')
+      .select('id, user_id')
       .eq('mux_upload_id', uploadId)
       .single();
 
@@ -510,8 +379,26 @@ export class MessagesService {
       return;
     }
 
-    // Mux HLS stream requires a signed token — use audio-only rendition via public playback URL
-    const muxPlaybackUrl = `https://stream.mux.com/${playbackId}.m3u8`;
+    // Assets use signed playback policy — generate a short-lived JWT for Deepgram.
+    const signingKey = this.config.get<string>('MUX_SIGNING_KEY');
+    const privateKey = this.config.get<string>('MUX_PRIVATE_KEY');
+    if (!signingKey || !privateKey) {
+      await this.setTranscriptionFailed(messageId);
+      return;
+    }
+
+    let muxPlaybackUrl: string;
+    try {
+      const mux = this.getMuxClient();
+      const jwtToken = await mux.jwt.signPlaybackId(playbackId, {
+        type: 'video',
+        expiration: '1h',
+      });
+      muxPlaybackUrl = `https://stream.mux.com/${playbackId}.m3u8?token=${jwtToken}`;
+    } catch {
+      await this.setTranscriptionFailed(messageId);
+      return;
+    }
 
     try {
       const client = new DeepgramClient({ apiKey });
@@ -606,11 +493,10 @@ export class MessagesService {
       .from('messages')
       .select('*')
       .eq('id', messageId)
+      .eq('user_id', userId)
       .single();
 
     if (error || !message) throw new NotFoundException('Message not found');
-    if (message.user_id !== userId)
-      throw new ForbiddenException('Not your message');
     return message;
   }
 

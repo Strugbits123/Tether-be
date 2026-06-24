@@ -18,22 +18,28 @@ import { AssignmentDto } from './assignment.dto.js';
 export class DocumentItemDto {
   @IsString()
   @IsNotEmpty()
+  @MaxLength(500)
   storagePath: string;
 
   @IsString()
   @IsNotEmpty()
+  @MaxLength(255)
   originalFilename: string;
 
-  @IsIn(['pdf', 'docx', 'jpg', 'jpeg', 'png', 'heic'])
+  @IsIn([
+    'pdf', 'docx', 'jpg', 'jpeg', 'png', 'heic',
+    'mp3', 'm4a', 'wav', 'ogg', 'aac', 'webm', 'mp4', 'mov', 'avi', 'mpeg',
+  ])
   fileType: string;
 
   @IsInt()
   @Min(1)
-  @Max(26214400)
+  @Max(52428800)
   fileSizeBytes: number;
 
   @IsOptional()
   @IsString()
+  @MaxLength(200)
   title?: string;
 
   @IsOptional()
@@ -52,6 +58,7 @@ export class DocumentItemDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(100)
   mimeType?: string;
 }
 

@@ -1,6 +1,5 @@
 import { randomUUID } from 'crypto';
 import {
-  ForbiddenException,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
@@ -18,11 +17,23 @@ import { UpdateDocumentDto } from './dto/update-document.dto.js';
 
 const MIME_TO_EXT: Record<string, string> = {
   'application/pdf': 'pdf',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
-    'docx',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  'application/msword': 'docx',
   'image/jpeg': 'jpg',
   'image/png': 'png',
   'image/heic': 'heic',
+  'audio/webm': 'webm',
+  'audio/mpeg': 'mp3',
+  'audio/mp4': 'm4a',
+  'audio/wav': 'wav',
+  'audio/ogg': 'ogg',
+  'audio/aac': 'aac',
+  'audio/x-m4a': 'm4a',
+  'video/mp4': 'mp4',
+  'video/webm': 'webm',
+  'video/quicktime': 'mov',
+  'video/x-msvideo': 'avi',
+  'video/mpeg': 'mpeg',
 };
 
 const ALL_CATEGORIES = [
@@ -125,6 +136,16 @@ export class DocumentsService {
         (d) => (d as Record<string, unknown>).category,
       ),
     });
+
+    // Mark create_message onboarding step when audio/video is uploaded,
+    // since these replace the old messages audio/video upload flow.
+    const hasMedia = dto.documents.some((d) => {
+      const mime = d.mimeType ?? '';
+      return mime.startsWith('audio/') || mime.startsWith('video/');
+    });
+    if (hasMedia) {
+      this.markOnboardingStep(userId, 'create_message').catch(() => null);
+    }
 
     return { count: createdDocuments.length, documents: createdDocuments };
   }
@@ -240,19 +261,23 @@ export class DocumentsService {
       );
     }
 
-    return Promise.all(
-      docs.map(async (doc) => {
-        const { data: urlData } = await this.supabase
-          .getClient()
-          .storage.from('documents')
-          .createSignedUrl(doc.storage_path, 3600);
-        return {
-          ...doc,
-          signedUrl: urlData?.signedUrl ?? null,
-          assignmentCount: assignmentMap.get(doc.id) ?? 0,
-        };
-      }),
+    const { data: urlResults } = await this.supabase
+      .getClient()
+      .storage.from('documents')
+      .createSignedUrls(
+        docs.map((d) => d.storage_path),
+        3600,
+      );
+
+    const urlMap = new Map(
+      (urlResults ?? []).map((r) => [r.path, r.signedUrl]),
     );
+
+    return docs.map((doc) => ({
+      ...doc,
+      signedUrl: urlMap.get(doc.storage_path) ?? null,
+      assignmentCount: assignmentMap.get(doc.id) ?? 0,
+    }));
   }
 
   async getDocument(userId: string, documentId: string) {
@@ -380,11 +405,10 @@ export class DocumentsService {
       .from('documents')
       .select('*')
       .eq('id', documentId)
+      .eq('user_id', userId)
       .single();
 
     if (error || !data) throw new NotFoundException('Document not found');
-    if (data.user_id !== userId)
-      throw new ForbiddenException('Not your document');
     return data;
   }
 
@@ -414,6 +438,37 @@ export class DocumentsService {
         throw new InternalServerErrorException('Failed to create assignment');
       }
     }
+  }
+
+  private async markOnboardingStep(userId: string, step: string) {
+    const { data } = await this.supabase
+      .getClient()
+      .from('users')
+      .select('onboarding')
+      .eq('id', userId)
+      .single();
+
+    const onboarding = ((data?.onboarding ?? {}) as Record<string, unknown>);
+    if (onboarding[step]) return;
+
+    onboarding[step] = true;
+
+    const ALL_STEPS = [
+      'finish_account',
+      'add_release_manager',
+      'add_recipients',
+      'add_photos',
+      'create_message',
+    ];
+    if (ALL_STEPS.every((s) => onboarding[s] === true)) {
+      onboarding['completed_at'] = new Date().toISOString();
+    }
+
+    await this.supabase
+      .getClient()
+      .from('users')
+      .update({ onboarding, updated_at: new Date().toISOString() })
+      .eq('id', userId);
   }
 
   private async logUploadActivity(
