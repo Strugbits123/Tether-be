@@ -21,7 +21,9 @@ export class UsersService {
     const { data, error } = await this.supabase
       .getClient()
       .from('users')
-      .select('*')
+      .select(
+        'id, email, first_name, last_name, date_of_birth, zip_code, state, age_group, gender, relationship_status, phone_number, avatar_url, sms_opted_in, account_status, onboarding, created_at, updated_at, last_login_at',
+      )
       .eq('id', userId)
       .single();
 
@@ -140,7 +142,6 @@ export class UsersService {
       .eq('id', userId);
 
     if (error) {
-      console.error('completeOnboarding error:', JSON.stringify(error));
       throw new InternalServerErrorException('Failed to complete onboarding');
     }
 

@@ -52,7 +52,6 @@ export class RecipientsService {
       .single();
 
     if (error) {
-      console.error('Error inserting recipient:', error);
       throw new InternalServerErrorException('Failed to add recipient.');
     }
 

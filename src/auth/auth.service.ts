@@ -95,7 +95,7 @@ export class AuthService {
 
   async login(dto: LoginDto) {
     const { data, error } = await this.supabase
-      .getClient()
+      .getPublicClient()
       .auth.signInWithPassword({
         email: dto.email,
         password: dto.password,
@@ -131,7 +131,7 @@ export class AuthService {
   }
 
   async magicLink(dto: MagicLinkDto) {
-    const { error } = await this.supabase.getClient().auth.signInWithOtp({
+    const { error } = await this.supabase.getPublicClient().auth.signInWithOtp({
       email: dto.email,
       options: {
         emailRedirectTo: `${this.config.get('FRONTEND_URL')}/auth/callback`,
@@ -152,7 +152,7 @@ export class AuthService {
 
   async resetPassword(dto: ResetPasswordDto) {
     const { error } = await this.supabase
-      .getClient()
+      .getPublicClient()
       .auth.resetPasswordForEmail(dto.email, {
         redirectTo: `${this.config.get('FRONTEND_URL')}/auth/reset-password`,
       });

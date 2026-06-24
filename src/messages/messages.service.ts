@@ -175,7 +175,6 @@ export class MessagesService {
       .createSignedUploadUrl(storagePath);
 
     if (urlError) {
-      console.error('Error creating audio upload URL:', urlError);
       throw new InternalServerErrorException(
         'Failed to generate audio upload URL',
       );
@@ -200,7 +199,6 @@ export class MessagesService {
       .single();
 
     if (error || !message) {
-      console.error('messages audio INSERT error:', JSON.stringify(error));
       throw new InternalServerErrorException('Failed to create message record');
     }
 
@@ -254,7 +252,6 @@ export class MessagesService {
       .single();
 
     if (error || !updated) {
-      console.error('Error confirming audio upload:', JSON.stringify(error));
       throw new InternalServerErrorException('Failed to confirm upload');
     }
 
@@ -424,8 +421,8 @@ export class MessagesService {
       try {
         const mux = this.getMuxClient();
         await mux.video.assets.delete(message.mux_asset_id);
-      } catch (e) {
-        console.error('Mux asset delete failed:', e);
+      } catch {
+        // non-fatal: asset already deleted or Mux unreachable
       }
     }
 

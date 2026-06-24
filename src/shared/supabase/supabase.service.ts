@@ -6,6 +6,8 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 export class SupabaseService {
   private readonly client: SupabaseClient;
   private publicClient?: SupabaseClient;
+  private readonly userClients = new Map<string, SupabaseClient>();
+  private static readonly USER_CLIENT_CACHE_MAX = 100;
 
   constructor(private readonly config: ConfigService) {
     const url = this.config.get<string>('SUPABASE_URL');
@@ -55,19 +57,22 @@ export class SupabaseService {
   }
 
   getUserClient(accessToken: string): SupabaseClient {
-  const url = this.config.get<string>('SUPABASE_URL')!;
-  const key = this.config.get<string>('SUPABASE_SECRET_KEY')!;
+    const cached = this.userClients.get(accessToken);
+    if (cached) return cached;
 
-  return createClient(url, key, {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-    },
-    global: {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-      },
-    },
-  });
-}
+    const url = this.config.get<string>('SUPABASE_URL')!;
+    const key = this.config.get<string>('SUPABASE_SECRET_KEY')!;
+
+    const client = createClient(url, key, {
+      auth: { autoRefreshToken: false, persistSession: false },
+      global: { headers: { Authorization: `Bearer ${accessToken}` } },
+    });
+
+    if (this.userClients.size >= SupabaseService.USER_CLIENT_CACHE_MAX) {
+      const oldest = this.userClients.keys().next().value as string;
+      this.userClients.delete(oldest);
+    }
+    this.userClients.set(accessToken, client);
+    return client;
+  }
 }
