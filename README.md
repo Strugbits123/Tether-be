@@ -140,7 +140,15 @@ GET  /release-managers
 ```
 POST   /photos/upload-urls
 POST   /photos/batch
+POST   /photos/folders
+GET    /photos/folders
+PATCH  /photos/folders/:id
+DELETE /photos/folders/:id
 GET    /photos
+GET    /photos/:id
+GET    /photos/:id/download-url
+PATCH  /photos/:id
+PATCH  /photos/:id/move
 DELETE /photos/:id
 ```
 
@@ -149,8 +157,11 @@ DELETE /photos/:id
 ```
 POST   /documents/upload-urls
 POST   /documents/batch
+GET    /documents/stats
 GET    /documents
+GET    /documents/:id
 GET    /documents/:id/download-url
+PATCH  /documents/:id
 DELETE /documents/:id
 ```
 
@@ -158,8 +169,6 @@ DELETE /documents/:id
 
 ```
 POST   /messages
-POST   /messages/video/upload-url
-POST   /messages/audio/upload-url
 GET    /messages
 PATCH  /messages/reorder
 GET    /messages/:id
@@ -170,6 +179,21 @@ POST   /messages/:id/audio-url
 PATCH  /messages/:id
 DELETE /messages/:id
 ```
+
+### Content (protected)
+
+Read-only/bulk operations that span all content types (`message` |
+`document` | `photo` | `memoir`). See [`API_REFERENCE.md`](./API_REFERENCE.md)
+for request/response shapes.
+
+```
+GET  /content/unassigned        # items with no assignment (or only assign_later)
+POST /content/bulk-assign       # replace assignments across many items at once
+POST /content/bulk-delete       # delete many items across types (memoir skipped)
+```
+
+Group assignments use `groupValue` from the recipient relationship taxonomy:
+`family` | `friend` | `partner` | `colleague` | `other`.
 
 ### Activity (protected)
 
@@ -186,14 +210,18 @@ POST /webhooks/mux   # Mux server-to-server callback (signature-verified)
 
 ## Database
 
-Supabase PostgreSQL — 25 tables, RLS on all tables.
+Supabase PostgreSQL — 28 tables, RLS enabled on all tables.
 Schema: `tether_schema_v2.sql`
-Run migrations manually in Supabase SQL Editor.
-Never use automated migrations against production.
+
+Run migrations manually in the Supabase SQL Editor — never use automated
+migrations against production. Storage buckets: `avatars` (public, 5MB),
+`photos` (10MB), `documents` (50MB, PDF/docx/image/audio/video), and a legacy
+`audio` bucket. Bucket file-size caps are limited to 50MB by the project plan.
 
 ## Sprint Progress
 
 - Sprint 1 ✅ — Auth, Dashboard, Onboarding foundation
 - Sprint 2 ✅ — Recipients, Release Managers, Messages (text/video/audio + transcription), Photos, Documents, Activity feed
-- Sprint 3 🔄 — Photo/document compression & galleries (upcoming)
-- Sprint 4–10 — See sprint execution plan
+- Sprint 3 ✅ — Photo folders, content assignments, cross-type Content module (unassigned listing, bulk assign/delete)
+- Sprint 4 🔄 — Memoirs (long-form written content) — tables exist; services in progress
+- Sprint 5–10 — See sprint execution plan
