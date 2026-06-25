@@ -1,0 +1,7 @@
+#!/bin/sh
+# Block accidental commits of .env files containing real secrets.
+if git diff --cached --name-only | grep -qE '(^|/)\.env(\.|$)'; then
+  echo "ERROR: Attempted to commit a .env file. Remove it from staging:"
+  echo "  git reset HEAD <file>"
+  exit 1
+fi

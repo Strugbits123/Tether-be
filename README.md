@@ -74,7 +74,23 @@ All PRs require CodeRabbit review before merge.
 
 ## API Structure
 
-All routes prefixed with `/api/v1`
+All routes are prefixed with `/api/v1`. Full request/response shapes, validation rules,
+and error semantics are documented in [`API_REFERENCE.md`](./API_REFERENCE.md).
+
+### Response format
+
+Every response uses one uniform envelope, so the frontend implements a single handler:
+
+```jsonc
+// Success (HTTP 2xx)
+{ "success": true, "data": <payload>, "timestamp": "..." }
+
+// Error (any non-2xx)
+{ "success": false, "statusCode": 400, "message": "...", "timestamp": "...", "path": "..." }
+```
+
+`message` is always a string (validation failures are joined into one sentence). A global
+interceptor wraps successes; a global exception filter wraps errors.
 
 ### Auth (public)
 
@@ -85,7 +101,6 @@ POST /auth/magic-link
 POST /auth/reset-password
 POST /auth/refresh
 GET  /auth/google
-GET  /health
 ```
 
 ### Auth (protected)
@@ -98,25 +113,75 @@ POST /auth/update-password
 ### Users (protected)
 
 ```
-GET  /users/me
+GET   /users/me
 PATCH /users/profile
-POST /users/onboarding/complete
-POST /users/onboarding/purposes
+POST  /users/avatar-upload-url
+POST  /users/onboarding/complete
+POST  /users/onboarding/purposes
+GET   /users/onboarding/state
 ```
 
 ### Recipients (protected)
 
 ```
-POST   /recipients
-GET    /recipients
-DELETE /recipients/:id
+POST /recipients
+GET  /recipients
 ```
 
 ### Release Managers (protected)
 
 ```
 POST /release-managers
-GET  /release-managers/active
+GET  /release-managers
+```
+
+### Photos (protected)
+
+```
+POST   /photos/upload-urls
+POST   /photos/batch
+GET    /photos
+DELETE /photos/:id
+```
+
+### Documents (protected)
+
+```
+POST   /documents/upload-urls
+POST   /documents/batch
+GET    /documents
+GET    /documents/:id/download-url
+DELETE /documents/:id
+```
+
+### Messages (protected)
+
+```
+POST   /messages
+POST   /messages/video/upload-url
+POST   /messages/audio/upload-url
+GET    /messages
+PATCH  /messages/reorder
+GET    /messages/:id
+GET    /messages/:id/status
+POST   /messages/:id/confirm-upload
+POST   /messages/:id/playback-token
+POST   /messages/:id/audio-url
+PATCH  /messages/:id
+DELETE /messages/:id
+```
+
+### Activity (protected)
+
+```
+GET /activity
+```
+
+### System
+
+```
+GET  /health
+POST /webhooks/mux   # Mux server-to-server callback (signature-verified)
 ```
 
 ## Database
@@ -129,5 +194,6 @@ Never use automated migrations against production.
 ## Sprint Progress
 
 - Sprint 1 ✅ — Auth, Dashboard, Onboarding foundation
-- Sprint 2 🔄 — Message Recorder (upcoming)
-- Sprint 3–10 — See sprint execution plan
+- Sprint 2 ✅ — Recipients, Release Managers, Messages (text/video/audio + transcription), Photos, Documents, Activity feed
+- Sprint 3 🔄 — Photo/document compression & galleries (upcoming)
+- Sprint 4–10 — See sprint execution plan

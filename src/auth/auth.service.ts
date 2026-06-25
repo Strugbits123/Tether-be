@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
+import { PostHogService } from '../shared/posthog/posthog.service.js';
 import { SignupDto } from './dto/signup.dto.js';
 import { LoginDto } from './dto/login.dto.js';
 import { MagicLinkDto } from './dto/magic-link.dto.js';
@@ -18,18 +19,51 @@ export class AuthService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly config: ConfigService,
+    private readonly posthog: PostHogService,
   ) {}
 
   async signup(dto: SignupDto) {
+    // Pre-flight: check if this email already has a row in public.users.
+    // This catches cases where a Google-OAuth user later attempts an
+    // email/password signup, which can bypass the identities-array check
+    // and trigger a second DB row via the handle_new_user trigger.
+    // Wrapped in try/catch so a transient query failure never blocks signup.
+    try {
+      const { data: existingUser } = await this.supabase
+        .getClient()
+        .from('users')
+        .select('id')
+        .eq('email', dto.email.toLowerCase())
+        .maybeSingle();
+
+      if (existingUser) {
+        throw new ConflictException(
+          'An account with this email already exists. Please sign in or reset your password.',
+        );
+      }
+    } catch (e) {
+      if (e instanceof ConflictException) throw e;
+      // Transient DB error — proceed and let Supabase auth be the authority.
+    }
+
     const { data, error } = await this.supabase.getPublicClient().auth.signUp({
       email: dto.email,
       password: dto.password,
       options: {
         emailRedirectTo: `${this.config.get('FRONTEND_URL')}/auth/callback`,
+        data: {
+          first_name: dto.first_name ?? null,
+          last_name: dto.last_name ?? null,
+        },
       },
     });
 
     if (error) {
+      if (error.message.toLowerCase().includes('already registered')) {
+        throw new ConflictException(
+          'An account with this email already exists. Please sign in or reset your password.',
+        );
+      }
       throw new BadRequestException(error.message);
     }
 
@@ -45,16 +79,34 @@ export class AuthService {
       );
     }
 
+    if (data.user?.id) {
+      this.posthog.capture(data.user.id, 'server_user_signed_up', {
+        email: data.user.email,
+        provider: 'email',
+      });
+      this.posthog.identify(data.user.id, {
+        email: data.user.email,
+        created_at: new Date().toISOString(),
+      });
+    }
+
     return {
       message:
         'Account created. Please check your email to verify your account.',
       user_id: data.user?.id ?? null,
+      session: data.session
+        ? {
+            access_token: data.session.access_token,
+            refresh_token: data.session.refresh_token,
+            expires_at: data.session.expires_at,
+          }
+        : null,
     };
   }
 
   async login(dto: LoginDto) {
     const { data, error } = await this.supabase
-      .getClient()
+      .getPublicClient()
       .auth.signInWithPassword({
         email: dto.email,
         password: dto.password,
@@ -90,7 +142,7 @@ export class AuthService {
   }
 
   async magicLink(dto: MagicLinkDto) {
-    const { error } = await this.supabase.getClient().auth.signInWithOtp({
+    const { error } = await this.supabase.getPublicClient().auth.signInWithOtp({
       email: dto.email,
       options: {
         emailRedirectTo: `${this.config.get('FRONTEND_URL')}/auth/callback`,
@@ -111,7 +163,7 @@ export class AuthService {
 
   async resetPassword(dto: ResetPasswordDto) {
     const { error } = await this.supabase
-      .getClient()
+      .getPublicClient()
       .auth.resetPasswordForEmail(dto.email, {
         redirectTo: `${this.config.get('FRONTEND_URL')}/auth/reset-password`,
       });

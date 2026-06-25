@@ -28,7 +28,7 @@ function sanitizeUser(user: Record<string, any>): Record<string, any> {
 function sanitizeResponse(data: any): any {
   if (!data) return data;
 
-  if (data.id && data.email && data.account_status) {
+  if (data.id && data.email) {
     return sanitizeUser(data);
   }
 

@@ -1,5 +1,6 @@
 import { UpdateProfileDto } from './dto/update-profile.dto.js';
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
+import { PostHogService } from '../shared/posthog/posthog.service.js';
 import {
   Injectable,
   InternalServerErrorException,
@@ -13,13 +14,16 @@ export class UsersService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly activityService: ActivityService,
+    private readonly posthog: PostHogService,
   ) {}
 
   async getMe(userId: string) {
     const { data, error } = await this.supabase
       .getClient()
       .from('users')
-      .select('*')
+      .select(
+        'id, email, first_name, last_name, full_name, date_of_birth, zip_code, state, age_group, gender, relationship_status, phone_number, avatar_url, sms_opted_in, account_status, auth_provider, role, onboarding, created_at, updated_at, last_login_at',
+      )
       .eq('id', userId)
       .single();
 
@@ -59,6 +63,15 @@ export class UsersService {
 
       if (!wasCompleted) {
         this.activityService.log(userId, 'profile_completed', 'Profile completed', {});
+        this.posthog.capture(userId, 'server_profile_completed', {
+          has_avatar: !!dto.avatar_url,
+        });
+        this.posthog.identify(userId, {
+          first_name: dto.first_name,
+          last_name: dto.last_name,
+          state: dto.state,
+          age_group: dto.age_group,
+        });
       }
     }
 
@@ -129,7 +142,6 @@ export class UsersService {
       .eq('id', userId);
 
     if (error) {
-      console.error('completeOnboarding error:', JSON.stringify(error));
       throw new InternalServerErrorException('Failed to complete onboarding');
     }
 

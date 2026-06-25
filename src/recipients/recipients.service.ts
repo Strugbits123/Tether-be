@@ -6,12 +6,14 @@ import {
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
 import { CreateRecipientDto } from './dto/create-recipient.dto.js';
 import { ActivityService } from '../activity/activity.service.js';
+import { PostHogService } from '../shared/posthog/posthog.service.js';
 
 @Injectable()
 export class RecipientsService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly activityService: ActivityService,
+    private readonly posthog: PostHogService,
   ) {}
 
   // POST /recipients
@@ -45,12 +47,11 @@ export class RecipientsService {
         note: dto.note ?? null,
       })
       .select(
-        'id, name, email, phone, relationship, note, invitation_status, access_code, created_at',
+        'id, name, email, phone, relationship, note, invitation_status, created_at',
       )
       .single();
 
     if (error) {
-      console.error('Error inserting recipient:', error);
       throw new InternalServerErrorException('Failed to add recipient.');
     }
 
@@ -67,6 +68,9 @@ export class RecipientsService {
         relationship: dto.relationship,
       },
     );
+    this.posthog.capture(userId, 'server_recipient_added', {
+      relationship: dto.relationship,
+    });
 
     return data;
   }
