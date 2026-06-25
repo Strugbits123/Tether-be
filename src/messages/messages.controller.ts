@@ -12,6 +12,8 @@ import {
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { MessagesService } from './messages.service.js';
 import { CreateTextMessageDto } from './dto/create-text-message.dto.js';
+import { CreateVideoMessageDto } from './dto/create-video-message.dto.js';
+import { CreateAudioMessageDto } from './dto/create-audio-message.dto.js';
 import { ConfirmUploadDto } from './dto/confirm-upload.dto.js';
 import { UpdateMessageDto } from './dto/update-message.dto.js';
 import { ReorderMessagesDto } from './dto/reorder-messages.dto.js';
@@ -24,6 +26,16 @@ export class MessagesController {
   @Post()
   createTextMessage(@Request() req: any, @Body() dto: CreateTextMessageDto) {
     return this.messagesService.createTextMessage(req.user.id, dto);
+  }
+
+  @Post('video/upload-url')
+  createVideoUploadUrl(@Request() req: any, @Body() dto: CreateVideoMessageDto) {
+    return this.messagesService.createVideoUploadUrl(req.user.id, dto);
+  }
+
+  @Post('audio/upload-url')
+  createAudioUploadUrl(@Request() req: any, @Body() dto: CreateAudioMessageDto) {
+    return this.messagesService.createAudioUploadUrl(req.user.id, dto);
   }
 
   @Get()
