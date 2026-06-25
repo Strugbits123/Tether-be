@@ -117,7 +117,7 @@ export class DocumentsService {
 
     for (const doc of dto.documents) {
       const title = doc.title ?? doc.originalFilename.replace(/\.[^.]+$/, '');
-      const category = doc.category ?? 'personal';
+      const category = doc.category ?? 'other';
 
       const { data: created, error } = await this.supabase
         .getClient()
