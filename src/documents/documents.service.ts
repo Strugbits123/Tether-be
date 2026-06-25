@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
 import {
+  BadRequestException,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
@@ -57,6 +58,26 @@ export class DocumentsService {
   ) {}
 
   async getUploadUrls(userId: string, files: DocumentFileDescriptorDto[]) {
+    // Server-side validation runs BEFORE any presigned URL is issued.
+    // Audio/video may be stored as documents up to 50MB; all other document
+    // types (PDF, DOCX, images) are capped at 25MB.
+    const NON_AV_MAX_BYTES = 26214400; // 25MB
+    const AV_MAX_BYTES = 52428800; // 50MB
+    for (const file of files) {
+      if (!(file.fileType in MIME_TO_EXT)) {
+        throw new BadRequestException('File type not supported');
+      }
+      const isAv =
+        file.fileType.startsWith('audio/') ||
+        file.fileType.startsWith('video/');
+      if (!isAv && file.fileSizeBytes > NON_AV_MAX_BYTES) {
+        throw new BadRequestException('File exceeds 25MB limit');
+      }
+      if (isAv && file.fileSizeBytes > AV_MAX_BYTES) {
+        throw new BadRequestException('File exceeds 50MB limit');
+      }
+    }
+
     const results: {
       signedUploadUrl: string;
       token: string;

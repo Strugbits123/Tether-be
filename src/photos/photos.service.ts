@@ -197,7 +197,18 @@ export class PhotosService {
       .storage.from('photos')
       .createSignedUrl(photo.storage_path, 3600);
 
-    return { ...photo, signedUrl: urlData?.signedUrl ?? null };
+    const { data: assignments } = await this.supabase
+      .getClient()
+      .from('content_assignments')
+      .select('assignment_scope, group_value, recipient_id')
+      .eq('content_type', 'photo')
+      .eq('content_id', photoId);
+
+    return {
+      ...photo,
+      signedUrl: urlData?.signedUrl ?? null,
+      assignments: assignments ?? [],
+    };
   }
 
   async updatePhoto(userId: string, photoId: string, dto: UpdatePhotoDto) {
