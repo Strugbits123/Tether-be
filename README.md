@@ -75,7 +75,7 @@ All PRs require CodeRabbit review before merge.
 ## API Structure
 
 All routes are prefixed with `/api/v1`. Full request/response shapes, validation rules,
-and error semantics are documented in [`API_REFERENCE.md`](./API_REFERENCE.md).
+and error semantics are defined by the DTOs and global interceptor/exception filter in `src/`.
 
 ### Response format
 
@@ -183,8 +183,7 @@ DELETE /messages/:id
 ### Content (protected)
 
 Read-only/bulk operations that span all content types (`message` |
-`document` | `photo` | `memoir`). See [`API_REFERENCE.md`](./API_REFERENCE.md)
-for request/response shapes.
+`document` | `photo` | `memoir`).
 
 ```
 GET  /content/unassigned        # items with no assignment (or only assign_later)
@@ -211,7 +210,6 @@ POST /webhooks/mux   # Mux server-to-server callback (signature-verified)
 ## Database
 
 Supabase PostgreSQL — 28 tables, RLS enabled on all tables.
-Schema: `tether_schema_v2.sql`
 
 Run migrations manually in the Supabase SQL Editor — never use automated
 migrations against production. Storage buckets: `avatars` (public, 5MB),
