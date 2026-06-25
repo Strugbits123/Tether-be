@@ -1,0 +1,272 @@
+import {
+  BadRequestException,
+  Injectable,
+  InternalServerErrorException,
+} from '@nestjs/common';
+import { SupabaseService } from '../shared/supabase/supabase.service.js';
+import { MessagesService } from '../messages/messages.service.js';
+import { DocumentsService } from '../documents/documents.service.js';
+import { PhotosService } from '../photos/photos.service.js';
+import { AssignmentDto } from '../documents/dto/assignment.dto.js';
+import { BulkAssignDto } from './dto/bulk-assign.dto.js';
+import { BulkDeleteDto } from './dto/bulk-delete.dto.js';
+
+export interface UnassignedItem {
+  id: string;
+  contentType: 'message' | 'document' | 'photo' | 'memoir';
+  title: string;
+  subType: string | null;
+  fileSize: number | null;
+  createdAt: string;
+}
+
+// Maps the public `contentType` to the value stored in
+// content_assignments.content_type. Memoir items are tracked per chapter.
+const ASSIGNMENT_TYPE: Record<string, string> = {
+  message: 'message',
+  document: 'document',
+  photo: 'photo',
+  memoir: 'memoir_chapter',
+};
+
+@Injectable()
+export class ContentService {
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly messagesService: MessagesService,
+    private readonly documentsService: DocumentsService,
+    private readonly photosService: PhotosService,
+  ) {}
+
+  async getUnassigned(userId: string, typeFilter?: string) {
+    const supabase = this.supabase.getClient();
+    const results: UnassignedItem[] = [];
+
+    // Build the set of content that has at least one "real" (non-assign_later)
+    // assignment. Anything not in this set — whether it only has assign_later
+    // rows or no rows at all — counts as unassigned.
+    const { data: allAssignments } = await supabase
+      .from('content_assignments')
+      .select('content_type, content_id, assignment_scope')
+      .eq('user_id', userId);
+
+    const hasRealAssignment = new Set<string>();
+    for (const a of allAssignments ?? []) {
+      if (a.assignment_scope !== 'assign_later') {
+        hasRealAssignment.add(`${a.content_type}:${a.content_id}`);
+      }
+    }
+
+    const isUnassigned = (contentType: string, contentId: string) =>
+      !hasRealAssignment.has(`${contentType}:${contentId}`);
+
+    // Always scan every content type so `counts` reflects the full unassigned
+    // set; `typeFilter` only narrows the returned `items` list (applied below).
+    {
+      const { data: messages } = await supabase
+        .from('messages')
+        .select(
+          'id, title, type, processing_status, duration_seconds, file_size_bytes, created_at',
+        )
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false });
+
+      for (const m of messages ?? []) {
+        if (isUnassigned('message', m.id)) {
+          results.push({
+            id: m.id,
+            contentType: 'message',
+            title: m.title || 'Untitled Message',
+            subType: m.type, // 'text' | 'video' | 'audio'
+            fileSize: m.file_size_bytes,
+            createdAt: m.created_at,
+          });
+        }
+      }
+    }
+
+    {
+      const { data: docs } = await supabase
+        .from('documents')
+        .select('id, title, file_type, file_size_bytes, created_at')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false });
+
+      for (const d of docs ?? []) {
+        if (isUnassigned('document', d.id)) {
+          results.push({
+            id: d.id,
+            contentType: 'document',
+            title: d.title || 'Untitled Document',
+            subType: d.file_type?.toUpperCase() ?? null, // 'PDF' | 'DOCX' | 'JPG'
+            fileSize: d.file_size_bytes,
+            createdAt: d.created_at,
+          });
+        }
+      }
+    }
+
+    {
+      const { data: photos } = await supabase
+        .from('photos')
+        .select('id, title, storage_path, file_size_bytes, created_at')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false });
+
+      for (const p of photos ?? []) {
+        if (isUnassigned('photo', p.id)) {
+          results.push({
+            id: p.id,
+            contentType: 'photo',
+            title:
+              p.title || p.storage_path?.split('/').pop() || 'Untitled Photo',
+            subType: null,
+            fileSize: p.file_size_bytes,
+            createdAt: p.created_at,
+          });
+        }
+      }
+    }
+
+    // Memoir chapters are Sprint 4 scope — the table may not exist in every
+    // environment, so query defensively and skip on error.
+    {
+      try {
+        const { data: chapters, error } = await supabase
+          .from('memoir_chapters')
+          .select('id, title, tts_status, created_at')
+          .eq('user_id', userId)
+          .order('created_at', { ascending: false });
+
+        if (!error) {
+          for (const c of chapters ?? []) {
+            if (isUnassigned('memoir_chapter', c.id)) {
+              results.push({
+                id: c.id,
+                contentType: 'memoir',
+                title: c.title || 'Untitled Chapter',
+                subType: c.tts_status ?? null,
+                fileSize: null,
+                createdAt: c.created_at,
+              });
+            }
+          }
+        }
+      } catch {
+        // memoir_chapters table doesn't exist yet — skip silently
+      }
+    }
+
+    results.sort(
+      (a, b) =>
+        new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+    );
+
+    // Counts always reflect the full unassigned set, independent of typeFilter.
+    const counts = {
+      total: results.length,
+      message: results.filter((r) => r.contentType === 'message').length,
+      document: results.filter((r) => r.contentType === 'document').length,
+      photo: results.filter((r) => r.contentType === 'photo').length,
+      memoir: results.filter((r) => r.contentType === 'memoir').length,
+    };
+
+    const items = typeFilter
+      ? results.filter((r) => r.contentType === typeFilter)
+      : results;
+
+    return { items, counts };
+  }
+
+  async bulkAssign(userId: string, dto: BulkAssignDto) {
+    for (const item of dto.items) {
+      const assignmentType = ASSIGNMENT_TYPE[item.contentType];
+
+      await this.supabase
+        .getClient()
+        .from('content_assignments')
+        .delete()
+        .eq('user_id', userId)
+        .eq('content_type', assignmentType)
+        .eq('content_id', item.contentId);
+
+      await this.createAssignments(
+        userId,
+        assignmentType,
+        item.contentId,
+        dto.assignments,
+      );
+    }
+
+    return { updated: dto.items.length };
+  }
+
+  async bulkDelete(userId: string, dto: BulkDeleteDto) {
+    let deleted = 0;
+    const skipped: { contentType: string; contentId: string }[] = [];
+
+    for (const item of dto.items) {
+      switch (item.contentType) {
+        case 'message':
+          await this.messagesService.deleteMessage(userId, item.contentId);
+          deleted++;
+          break;
+        case 'document':
+          await this.documentsService.deleteDocument(userId, item.contentId);
+          deleted++;
+          break;
+        case 'photo':
+          await this.photosService.deletePhoto(userId, item.contentId);
+          deleted++;
+          break;
+        default:
+          // 'memoir' is not built yet — skip for now.
+          skipped.push(item);
+      }
+    }
+
+    return { deleted, skipped };
+  }
+
+  private async createAssignments(
+    userId: string,
+    contentType: string,
+    contentId: string,
+    assignments: AssignmentDto[],
+  ) {
+    const effective =
+      assignments.length > 0 ? assignments : [{ scope: 'assign_later' }];
+
+    for (const a of effective) {
+      // The DB enforces group => group_value present, individual => recipient
+      // present. Catch these here for a clean 400 instead of a DB-level 500.
+      if (a.scope === 'group' && !a.groupValue) {
+        throw new BadRequestException(
+          'groupValue is required when scope is "group"',
+        );
+      }
+      if (a.scope === 'individual' && !a.recipientId) {
+        throw new BadRequestException(
+          'recipientId is required when scope is "individual"',
+        );
+      }
+
+      const { error } = await this.supabase
+        .getClient()
+        .from('content_assignments')
+        .insert({
+          user_id: userId,
+          content_type: contentType,
+          content_id: contentId,
+          assignment_scope: a.scope,
+          group_value: a.scope === 'group' ? (a.groupValue ?? null) : null,
+          recipient_id:
+            a.scope === 'individual' ? (a.recipientId ?? null) : null,
+        });
+
+      if (error) {
+        throw new InternalServerErrorException('Failed to create assignment');
+      }
+    }
+  }
+}

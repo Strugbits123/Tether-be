@@ -11,6 +11,7 @@ import { PhotosModule } from './photos/photos.module.js';
 import { MessagesModule } from './messages/messages.module.js';
 import { DocumentsModule } from './documents/documents.module.js';
 import { ActivityModule } from './activity/activity.module.js';
+import { ContentModule } from './content/content.module.js';
 
 @Module({
   imports: [
@@ -36,6 +37,7 @@ import { ActivityModule } from './activity/activity.module.js';
     MessagesModule,
     DocumentsModule,
     ActivityModule,
+    ContentModule,
   ],
 })
 export class AppModule {}
