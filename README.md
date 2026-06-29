@@ -13,7 +13,7 @@ NestJS backend for Tether — Digital Legacy Platform
 - Resend (transactional email)
 - Twilio 10DLC (SMS)
 - Sentry (error tracking)
-- Railway (hosting)
+- Railway (hosting) (seperate environments for production and test)
 
 ## Prerequisites
 
