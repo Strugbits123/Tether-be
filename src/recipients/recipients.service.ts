@@ -93,6 +93,25 @@ export class RecipientsService {
     return data ?? [];
   }
 
+  // Used by other modules (e.g. chapters) to resolve recipient names for
+  // individual assignments without duplicating the query pattern.
+  async findByIds(userId: string, ids: string[]) {
+    if (ids.length === 0) return [];
+
+    const { data, error } = await this.supabase
+      .getClient()
+      .from('recipients')
+      .select('id, name, relationship')
+      .eq('user_id', userId)
+      .in('id', ids);
+
+    if (error) {
+      throw new InternalServerErrorException('Failed to fetch recipients.');
+    }
+
+    return data ?? [];
+  }
+
   // -------------------------------------------------------------------------
   // Private helpers
   // -------------------------------------------------------------------------

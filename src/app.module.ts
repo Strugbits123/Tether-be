@@ -10,6 +10,7 @@ import { ReleaseManagersModule } from './release-managers/release-managers.modul
 import { PhotosModule } from './photos/photos.module.js';
 import { MessagesModule } from './messages/messages.module.js';
 import { DocumentsModule } from './documents/documents.module.js';
+import { ChaptersModule } from './chapters/chapters.module.js';
 import { ActivityModule } from './activity/activity.module.js';
 import { ContentModule } from './content/content.module.js';
 
@@ -36,6 +37,7 @@ import { ContentModule } from './content/content.module.js';
     PhotosModule,
     MessagesModule,
     DocumentsModule,
+    ChaptersModule,
     ActivityModule,
     ContentModule,
   ],

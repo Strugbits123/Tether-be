@@ -7,13 +7,14 @@ import { SupabaseService } from '../shared/supabase/supabase.service.js';
 import { MessagesService } from '../messages/messages.service.js';
 import { DocumentsService } from '../documents/documents.service.js';
 import { PhotosService } from '../photos/photos.service.js';
+import { ChaptersService } from '../chapters/chapters.service.js';
 import { AssignmentDto } from '../documents/dto/assignment.dto.js';
 import { BulkAssignDto } from './dto/bulk-assign.dto.js';
 import { BulkDeleteDto } from './dto/bulk-delete.dto.js';
 
 export interface UnassignedItem {
   id: string;
-  contentType: 'message' | 'document' | 'photo' | 'memoir';
+  contentType: 'message' | 'document' | 'photo' | 'chapter';
   title: string;
   subType: string | null;
   fileSize: number | null;
@@ -21,12 +22,12 @@ export interface UnassignedItem {
 }
 
 // Maps the public `contentType` to the value stored in
-// content_assignments.content_type. Memoir items are tracked per chapter.
+// content_assignments.content_type.
 const ASSIGNMENT_TYPE: Record<string, string> = {
   message: 'message',
   document: 'document',
   photo: 'photo',
-  memoir: 'memoir_chapter',
+  chapter: 'chapter',
 };
 
 @Injectable()
@@ -36,6 +37,7 @@ export class ContentService {
     private readonly messagesService: MessagesService,
     private readonly documentsService: DocumentsService,
     private readonly photosService: PhotosService,
+    private readonly chaptersService: ChaptersService,
   ) {}
 
   async getUnassigned(userId: string, typeFilter?: string) {
@@ -128,32 +130,24 @@ export class ContentService {
       }
     }
 
-    // Memoir chapters are Sprint 4 scope — the table may not exist in every
-    // environment, so query defensively and skip on error.
     {
-      try {
-        const { data: chapters, error } = await supabase
-          .from('memoir_chapters')
-          .select('id, title, tts_status, created_at')
-          .eq('user_id', userId)
-          .order('created_at', { ascending: false });
+      const { data: chapters } = await supabase
+        .from('chapters')
+        .select('id, title, status, created_at')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false });
 
-        if (!error) {
-          for (const c of chapters ?? []) {
-            if (isUnassigned('memoir_chapter', c.id)) {
-              results.push({
-                id: c.id,
-                contentType: 'memoir',
-                title: c.title || 'Untitled Chapter',
-                subType: c.tts_status ?? null,
-                fileSize: null,
-                createdAt: c.created_at,
-              });
-            }
-          }
+      for (const c of chapters ?? []) {
+        if (isUnassigned('chapter', c.id)) {
+          results.push({
+            id: c.id,
+            contentType: 'chapter',
+            title: c.title || 'Untitled Chapter',
+            subType: c.status ?? null,
+            fileSize: null,
+            createdAt: c.created_at,
+          });
         }
-      } catch {
-        // memoir_chapters table doesn't exist yet — skip silently
       }
     }
 
@@ -168,7 +162,7 @@ export class ContentService {
       message: results.filter((r) => r.contentType === 'message').length,
       document: results.filter((r) => r.contentType === 'document').length,
       photo: results.filter((r) => r.contentType === 'photo').length,
-      memoir: results.filter((r) => r.contentType === 'memoir').length,
+      chapter: results.filter((r) => r.contentType === 'chapter').length,
     };
 
     const items = typeFilter
@@ -219,8 +213,11 @@ export class ContentService {
           await this.photosService.deletePhoto(userId, item.contentId);
           deleted++;
           break;
+        case 'chapter':
+          await this.chaptersService.deleteChapter(userId, item.contentId);
+          deleted++;
+          break;
         default:
-          // 'memoir' is not built yet — skip for now.
           skipped.push(item);
       }
     }
