@@ -30,7 +30,7 @@ const CHAPTER_LIST_COLUMNS =
   'id, title, date_label, theme, type, status, word_count, display_order, created_at, updated_at';
 
 const CHAPTER_DETAIL_COLUMNS =
-  'id, title, date_label, theme, type, status, word_count, display_order, body, audio_storage_path, audio_duration_seconds, audio_file_size_bytes, audio_mime_type, transcription_status, created_at, updated_at';
+  'id, title, date_label, theme, type, status, word_count, display_order, body, recipient_note, audio_storage_path, audio_duration_seconds, audio_file_size_bytes, audio_mime_type, transcription_status, created_at, updated_at';
 
 const SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
   allowedTags: [
@@ -685,6 +685,26 @@ export class ChaptersService {
       this.withRecipientName(a, recipientMap),
     );
 
+    // Persist recipient note: absent key = leave unchanged, empty string = clear
+    let savedNote: string | null | undefined = undefined;
+    if (dto.note !== undefined) {
+      const noteValue = dto.note === '' ? null : dto.note;
+      await this.supabase
+        .getClient()
+        .from('chapters')
+        .update({ recipient_note: noteValue, updated_at: new Date().toISOString() })
+        .eq('id', chapterId);
+      savedNote = noteValue;
+    } else {
+      const { data: current } = await this.supabase
+        .getClient()
+        .from('chapters')
+        .select('recipient_note')
+        .eq('id', chapterId)
+        .single();
+      savedNote = current?.recipient_note ?? null;
+    }
+
     this.activityService
       .log(
         userId,
@@ -700,11 +720,19 @@ export class ChaptersService {
       scopes: assignments.map((a) => a.assignment_scope),
     });
 
-    return { assignments, count: assignments.length };
+    return { assignments, count: assignments.length, note: savedNote ?? null };
   }
 
   async getAssignments(userId: string, chapterId: string) {
-    await this.requireOwnedChapter(userId, chapterId);
+    const { data: chapter } = await this.supabase
+      .getClient()
+      .from('chapters')
+      .select('id, recipient_note')
+      .eq('id', chapterId)
+      .eq('user_id', userId)
+      .single();
+
+    if (!chapter) throw new NotFoundException('Chapter not found');
 
     const { assignmentsByChapter, recipientIds } = await this.fetchAssignments(
       [chapterId],
@@ -715,7 +743,11 @@ export class ChaptersService {
       this.withRecipientName(a, recipientMap),
     );
 
-    return { assignments, count: assignments.length };
+    return {
+      assignments,
+      count: assignments.length,
+      note: chapter.recipient_note ?? null,
+    };
   }
 
   // ─── Voice Chapters ─────────────────────────────────────────────────────────

@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsArray, ValidateNested } from 'class-validator';
+import { IsArray, IsOptional, IsString, MaxLength, ValidateNested } from 'class-validator';
 import { ChapterAssignmentDto } from './assignment.dto.js';
 
 export class SetChapterAssignmentsDto {
@@ -7,4 +7,9 @@ export class SetChapterAssignmentsDto {
   @ValidateNested({ each: true })
   @Type(() => ChapterAssignmentDto)
   assignments: ChapterAssignmentDto[];
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  note?: string;
 }

@@ -156,7 +156,7 @@ export class MemoirService {
       .getClient()
       .from('chapters')
       .select(
-        'id, title, date_label, theme, type, status, body, word_count, display_order',
+        'id, title, date_label, theme, type, status, body, word_count, display_order, recipient_note',
       )
       .eq('user_id', userId)
       .order('display_order', { ascending: true });
@@ -250,6 +250,7 @@ export class MemoirService {
           type: chapter.type,
           body: chapter.body,
           word_count: chapter.word_count,
+          recipient_note: chapter.recipient_note ?? null,
           exhibits,
           tts_audio: ttsAudio,
         };
