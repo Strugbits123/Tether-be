@@ -3,9 +3,12 @@ import {
   BadRequestException,
   Injectable,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import sanitizeHtml from 'sanitize-html';
+import { DeepgramClient } from '@deepgram/sdk';
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
 import { ActivityService } from '../activity/activity.service.js';
 import { PostHogService } from '../shared/posthog/posthog.service.js';
@@ -18,9 +21,16 @@ import { RequestExhibitUploadUrlDto } from './dto/request-exhibit-upload-url.dto
 import { CreateExhibitDto } from './dto/create-exhibit.dto.js';
 import { ChapterAssignmentDto } from './dto/assignment.dto.js';
 import { SetChapterAssignmentsDto } from './dto/set-chapter-assignments.dto.js';
+import {
+  CreateVoiceChapterDto,
+  RequestVoiceUploadUrlDto,
+} from './dto/create-voice-chapter.dto.js';
 
 const CHAPTER_LIST_COLUMNS =
   'id, title, date_label, theme, type, status, word_count, display_order, created_at, updated_at';
+
+const CHAPTER_DETAIL_COLUMNS =
+  'id, title, date_label, theme, type, status, word_count, display_order, body, audio_storage_path, audio_duration_seconds, audio_file_size_bytes, audio_mime_type, transcription_status, created_at, updated_at';
 
 const SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
   allowedTags: [
@@ -49,11 +59,14 @@ const SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
 
 @Injectable()
 export class ChaptersService {
+  private readonly logger = new Logger(ChaptersService.name);
+
   constructor(
     private readonly supabase: SupabaseService,
     private readonly activityService: ActivityService,
     private readonly posthog: PostHogService,
     private readonly recipientsService: RecipientsService,
+    private readonly config: ConfigService,
   ) {}
 
   async createChapter(userId: string, dto: CreateChapterDto) {
@@ -176,7 +189,15 @@ export class ChaptersService {
   }
 
   async getChapter(userId: string, chapterId: string) {
-    const chapter = await this.requireOwnedChapter(userId, chapterId);
+    const { data: chapter, error } = await this.supabase
+      .getClient()
+      .from('chapters')
+      .select(CHAPTER_DETAIL_COLUMNS)
+      .eq('id', chapterId)
+      .eq('user_id', userId)
+      .single();
+
+    if (error || !chapter) throw new NotFoundException('Chapter not found');
 
     const { data: exhibitRows, error: exhibitError } = await this.supabase
       .getClient()
@@ -200,8 +221,18 @@ export class ChaptersService {
       this.withRecipientName(a, recipientMap),
     );
 
+    let audio_playback_url: string | null = null;
+    if (chapter.type === 'voice' && chapter.audio_storage_path) {
+      const { data: urlData } = await this.supabase
+        .getClient()
+        .storage.from('audio')
+        .createSignedUrl(chapter.audio_storage_path as string, 3600);
+      audio_playback_url = urlData?.signedUrl ?? null;
+    }
+
     return {
       ...chapter,
+      audio_playback_url,
       exhibits,
       assignments,
       assignment_count: assignments.length,
@@ -345,6 +376,29 @@ export class ChaptersService {
         .getClient()
         .storage.from('chapter-exhibits')
         .remove(paths);
+    }
+
+    // Delete voice recording from audio bucket if present
+    if (chapter.audio_storage_path) {
+      await this.supabase
+        .getClient()
+        .storage.from('audio')
+        .remove([chapter.audio_storage_path]);
+    }
+
+    // Delete TTS audio if present
+    const { data: ttsRow } = await this.supabase
+      .getClient()
+      .from('chapter_tts')
+      .select('storage_path')
+      .eq('chapter_id', chapterId)
+      .single();
+
+    if (ttsRow?.storage_path) {
+      await this.supabase
+        .getClient()
+        .storage.from('chapter-audio')
+        .remove([ttsRow.storage_path]);
     }
 
     await this.supabase
@@ -664,9 +718,226 @@ export class ChaptersService {
     return { assignments, count: assignments.length };
   }
 
-  // ---------------------------------------------------------------------
-  // Private helpers
-  // ---------------------------------------------------------------------
+  // ─── Voice Chapters ─────────────────────────────────────────────────────────
+
+  async getVoiceUploadUrl(userId: string, dto: RequestVoiceUploadUrlDto) {
+    if (!dto.file_type.startsWith('audio/')) {
+      throw new BadRequestException('file_type must be an audio MIME type');
+    }
+
+    const storagePath = `voice-chapters/${userId}/${randomUUID()}-${dto.file_name}`;
+
+    const { data, error } = await this.supabase
+      .getClient()
+      .storage.from('audio')
+      .createSignedUploadUrl(storagePath);
+
+    if (error || !data) {
+      throw new InternalServerErrorException('Failed to generate upload URL');
+    }
+
+    return {
+      upload_url: data.signedUrl,
+      storage_path: storagePath,
+    };
+  }
+
+  async createVoiceChapter(userId: string, dto: CreateVoiceChapterDto) {
+    const { data: existing } = await this.supabase
+      .getClient()
+      .from('chapters')
+      .select('display_order')
+      .eq('user_id', userId)
+      .order('display_order', { ascending: false })
+      .limit(1);
+
+    const nextOrder = (existing?.[0]?.display_order ?? -1) + 1;
+
+    const { data: created, error } = await this.supabase
+      .getClient()
+      .from('chapters')
+      .insert({
+        user_id: userId,
+        title: dto.title,
+        date_label: dto.date_label ?? null,
+        theme: dto.theme ?? null,
+        type: 'voice',
+        status: 'draft',
+        display_order: nextOrder,
+        audio_storage_path: dto.storage_path,
+        audio_duration_seconds: dto.duration_seconds ?? null,
+        audio_file_size_bytes: dto.file_size_bytes,
+        audio_mime_type: dto.file_type,
+        transcription_status: 'pending',
+      })
+      .select(
+        'id, title, date_label, theme, type, status, transcription_status, audio_duration_seconds, display_order, created_at',
+      )
+      .single();
+
+    if (error || !created) {
+      throw new InternalServerErrorException('Failed to create voice chapter');
+    }
+
+    this.activityService
+      .log(userId, 'voice_chapter_created', 'Created a voice chapter', {
+        chapterId: created.id,
+        title: created.title,
+      })
+      .catch(() => null);
+
+    this.posthog.capture(userId, 'server_voice_chapter_created', {
+      chapterId: created.id,
+      title: created.title,
+      duration_seconds: dto.duration_seconds,
+    });
+
+    this.transcribeVoiceChapter(userId, created.id, dto.storage_path).catch(
+      (err) => {
+        this.logger.error(
+          `Transcription failed for chapter ${created.id}`,
+          err,
+        );
+      },
+    );
+
+    return created;
+  }
+
+  async getTranscriptionStatus(userId: string, chapterId: string) {
+    const { data, error } = await this.supabase
+      .getClient()
+      .from('chapters')
+      .select('transcription_status, word_count, status')
+      .eq('id', chapterId)
+      .eq('user_id', userId)
+      .single();
+
+    if (error || !data) {
+      throw new NotFoundException('Chapter not found');
+    }
+
+    return {
+      transcription_status: data.transcription_status,
+      word_count: data.word_count ?? 0,
+      status: data.status,
+    };
+  }
+
+  private async transcribeVoiceChapter(
+    userId: string,
+    chapterId: string,
+    storagePath: string,
+  ) {
+    const supabase = this.supabase.getClient();
+
+    await supabase
+      .from('chapters')
+      .update({
+        transcription_status: 'processing',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', chapterId);
+
+    try {
+      const { data: urlData } = await supabase.storage
+        .from('audio')
+        .createSignedUrl(storagePath, 3600);
+
+      if (!urlData?.signedUrl) {
+        throw new Error('Failed to get signed URL for audio');
+      }
+
+      const apiKey = this.config.get<string>('DEEPGRAM_API_KEY');
+      if (!apiKey) throw new Error('DEEPGRAM_API_KEY not configured');
+
+      const deepgram = new DeepgramClient({ apiKey });
+      const response = await deepgram.listen.v1.media.transcribeUrl({
+        url: urlData.signedUrl,
+        model: 'nova-2',
+        smart_format: true,
+        paragraphs: true,
+        punctuate: true,
+        utterances: true,
+      });
+
+      const r = response as unknown as {
+        results?: {
+          channels?: Array<{
+            alternatives?: Array<{
+              transcript?: string;
+              paragraphs?: {
+                paragraphs?: Array<{
+                  sentences: Array<{ text: string }>;
+                }>;
+              };
+            }>;
+          }>;
+        };
+      };
+
+      const paragraphs =
+        r?.results?.channels?.[0]?.alternatives?.[0]?.paragraphs?.paragraphs;
+
+      let bodyHtml = '';
+      if (paragraphs && paragraphs.length > 0) {
+        bodyHtml = paragraphs
+          .map((p) => `<p>${p.sentences.map((s) => s.text).join(' ')}</p>`)
+          .join('');
+      } else {
+        const transcript =
+          r?.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? '';
+        bodyHtml = transcript ? `<p>${transcript}</p>` : '';
+      }
+
+      const plainText = bodyHtml.replace(/<[^>]*>/g, ' ').trim();
+      const wordCount = plainText ? plainText.split(/\s+/).length : 0;
+
+      await supabase
+        .from('chapters')
+        .update({
+          body: bodyHtml,
+          word_count: wordCount,
+          transcription_status: 'completed',
+          status: wordCount > 0 ? 'in_progress' : 'draft',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', chapterId);
+
+      this.activityService
+        .log(
+          userId,
+          'voice_chapter_transcribed',
+          'Voice chapter transcribed',
+          { chapterId, wordCount },
+        )
+        .catch(() => null);
+
+      this.posthog.capture(userId, 'server_voice_chapter_transcribed', {
+        chapterId,
+        wordCount,
+      });
+    } catch (error) {
+      await supabase
+        .from('chapters')
+        .update({
+          transcription_status: 'failed',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', chapterId);
+
+      this.activityService
+        .log(
+          userId,
+          'voice_chapter_transcription_failed',
+          'Voice transcription failed',
+          { chapterId },
+        )
+        .catch(() => null);
+    }
+  }
+
+  // ─── Private helpers ─────────────────────────────────────────────────────────
 
   private async requireOwnedChapter(userId: string, chapterId: string) {
     const { data, error } = await this.supabase

@@ -13,6 +13,7 @@ import { DocumentsModule } from './documents/documents.module.js';
 import { ChaptersModule } from './chapters/chapters.module.js';
 import { ActivityModule } from './activity/activity.module.js';
 import { ContentModule } from './content/content.module.js';
+import { MemoirModule } from './memoir/memoir.module.js';
 
 @Module({
   imports: [
@@ -40,6 +41,7 @@ import { ContentModule } from './content/content.module.js';
     ChaptersModule,
     ActivityModule,
     ContentModule,
+    MemoirModule,
   ],
 })
 export class AppModule {}

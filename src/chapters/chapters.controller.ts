@@ -18,6 +18,10 @@ import { ReorderChaptersDto } from './dto/reorder-chapters.dto.js';
 import { RequestExhibitUploadUrlDto } from './dto/request-exhibit-upload-url.dto.js';
 import { CreateExhibitDto } from './dto/create-exhibit.dto.js';
 import { SetChapterAssignmentsDto } from './dto/set-chapter-assignments.dto.js';
+import {
+  CreateVoiceChapterDto,
+  RequestVoiceUploadUrlDto,
+} from './dto/create-voice-chapter.dto.js';
 
 @Controller('chapters')
 @UseGuards(JwtAuthGuard)
@@ -34,15 +38,36 @@ export class ChaptersController {
     return this.chaptersService.listChapters(req.user.id);
   }
 
-  // Must be registered before ':id' so 'reorder' isn't matched as an id.
+  // Must be registered before ':id' so static paths aren't matched as an id.
   @Patch('reorder')
   reorderChapters(@Request() req: any, @Body() dto: ReorderChaptersDto) {
     return this.chaptersService.reorderChapters(req.user.id, dto);
   }
 
+  @Post('voice/upload-url')
+  getVoiceUploadUrl(
+    @Request() req: any,
+    @Body() dto: RequestVoiceUploadUrlDto,
+  ) {
+    return this.chaptersService.getVoiceUploadUrl(req.user.id, dto);
+  }
+
+  @Post('voice')
+  createVoiceChapter(
+    @Request() req: any,
+    @Body() dto: CreateVoiceChapterDto,
+  ) {
+    return this.chaptersService.createVoiceChapter(req.user.id, dto);
+  }
+
   @Get(':id')
   getChapter(@Request() req: any, @Param('id') id: string) {
     return this.chaptersService.getChapter(req.user.id, id);
+  }
+
+  @Get(':id/transcription')
+  getTranscriptionStatus(@Request() req: any, @Param('id') id: string) {
+    return this.chaptersService.getTranscriptionStatus(req.user.id, id);
   }
 
   @Patch(':id')

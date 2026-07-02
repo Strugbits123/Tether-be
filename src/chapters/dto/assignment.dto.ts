@@ -1,11 +1,15 @@
 import { IsIn, IsOptional, IsUUID } from 'class-validator';
+import {
+  ASSIGNMENT_SCOPES,
+  GROUP_VALUES,
+} from '../../common/constants/assignments.js';
 
 export class ChapterAssignmentDto {
-  @IsIn(['all', 'group', 'release_manager', 'assign_later', 'individual'])
+  @IsIn([...ASSIGNMENT_SCOPES])
   assignment_scope: string;
 
   @IsOptional()
-  @IsIn(['family', 'friends', 'others'])
+  @IsIn([...GROUP_VALUES])
   group_value?: string | null;
 
   @IsOptional()
