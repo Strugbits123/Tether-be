@@ -4,7 +4,7 @@ import { ConfigModule, ConfigModuleOptions } from '@nestjs/config';
 const REQUIRED_ENV_VARS = [
   'SUPABASE_URL',
   'SUPABASE_SECRET_KEY',
-  'SUPABASE_ANON_KEY',
+  'SUPABASE_PUBLISHABLE_KEY',
   'MUX_TOKEN_ID',
   'MUX_TOKEN_SECRET',
   'POSTHOG_API_KEY',

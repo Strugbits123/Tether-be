@@ -428,9 +428,40 @@ export class PhotosService {
       },
       {},
     );
+
+    // Batch-fetch every folder's recipient assignments in one query so the edit
+    // modal can pre-fill the current selection.
+    const { data: assignmentRows } = folderIds.length
+      ? await this.supabase
+          .getClient()
+          .from('content_assignments')
+          .select('content_id, assignment_scope, group_value, recipient_id')
+          .eq('user_id', userId)
+          .eq('content_type', 'photo_folder')
+          .in('content_id', folderIds)
+      : { data: [] };
+    const assignmentsMap = (assignmentRows ?? []).reduce<
+      Record<
+        string,
+        {
+          assignment_scope: string;
+          group_value: string | null;
+          recipient_id: string | null;
+        }[]
+      >
+    >((acc, row) => {
+      (acc[row.content_id] ??= []).push({
+        assignment_scope: row.assignment_scope,
+        group_value: row.group_value,
+        recipient_id: row.recipient_id,
+      });
+      return acc;
+    }, {});
+
     const foldersWithCounts = (folders ?? []).map((folder) => ({
       ...folder,
       photoCount: countMap[folder.id] ?? 0,
+      assignments: assignmentsMap[folder.id] ?? [],
     }));
 
     const { count: uncategorizedCount } = await this.supabase
@@ -459,6 +490,51 @@ export class PhotosService {
 
     if (updateError || !updated) {
       throw new InternalServerErrorException('Failed to rename folder');
+    }
+
+    // Replace the folder's recipient assignments only when the caller sent them.
+    if (dto.assignments) {
+      const { error: deleteError } = await this.supabase
+        .getClient()
+        .from('content_assignments')
+        .delete()
+        .eq('user_id', userId)
+        .eq('content_type', 'photo_folder')
+        .eq('content_id', folderId);
+
+      if (deleteError) {
+        throw new InternalServerErrorException(
+          'Failed to update folder assignments',
+        );
+      }
+
+      if (dto.assignments.length > 0) {
+        const rows = dto.assignments.map((assignment) => ({
+          user_id: userId,
+          content_type: 'photo_folder',
+          content_id: folderId,
+          assignment_scope: assignment.scope,
+          group_value:
+            assignment.scope === 'group'
+              ? (assignment.groupValue ?? null)
+              : null,
+          recipient_id:
+            assignment.scope === 'individual'
+              ? (assignment.recipientId ?? null)
+              : null,
+        }));
+
+        const { error: insertError } = await this.supabase
+          .getClient()
+          .from('content_assignments')
+          .insert(rows);
+
+        if (insertError) {
+          throw new InternalServerErrorException(
+            'Failed to save folder assignments',
+          );
+        }
+      }
     }
 
     return updated;
