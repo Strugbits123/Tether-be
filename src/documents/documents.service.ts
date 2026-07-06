@@ -33,6 +33,7 @@ const MIME_TO_EXT: Record<string, string> = {
   'video/mp4': 'mp4',
   'video/webm': 'webm',
   'video/quicktime': 'mov',
+  'video/x-m4v': 'm4v',
   'video/x-msvideo': 'avi',
   'video/mpeg': 'mpeg',
 };
