@@ -1,5 +1,22 @@
 import { Module } from '@nestjs/common';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigModuleOptions } from '@nestjs/config';
+
+const REQUIRED_ENV_VARS = [
+  'SUPABASE_URL',
+  'SUPABASE_SECRET_KEY',
+  'SUPABASE_ANON_KEY',
+  'MUX_TOKEN_ID',
+  'MUX_TOKEN_SECRET',
+  'POSTHOG_API_KEY',
+] as const;
+
+const validateEnv: ConfigModuleOptions['validate'] = (config: Record<string, unknown>) => {
+  const missing = REQUIRED_ENV_VARS.filter((key) => !config[key]);
+  if (missing.length > 0) {
+    throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
+  }
+  return config;
+};
 import { ThrottlerModule } from '@nestjs/throttler';
 import { SharedModule } from './shared/shared.module.js';
 import { AuthModule } from './auth/auth.module.js';
@@ -21,6 +38,7 @@ import { FeedbackModule } from './feedback/feedback.module.js';
     ConfigModule.forRoot({
       isGlobal: true,
       envFilePath: '.env',
+      validate: validateEnv,
     }),
     ThrottlerModule.forRoot({
       throttlers: [

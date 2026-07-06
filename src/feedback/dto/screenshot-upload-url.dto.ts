@@ -1,8 +1,9 @@
-import { IsIn, IsInt, IsNotEmpty, IsString, Max, Min } from 'class-validator';
+import { IsIn, IsInt, IsNotEmpty, IsString, Max, MaxLength, Min } from 'class-validator';
 
 export class ScreenshotUploadUrlDto {
   @IsString()
   @IsNotEmpty()
+  @MaxLength(255)
   file_name: string;
 
   @IsString()

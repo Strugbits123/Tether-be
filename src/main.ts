@@ -2,7 +2,7 @@ import './instrument.js';
 import * as Sentry from '@sentry/nestjs';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module.js';
-import { ValidationPipe } from '@nestjs/common';
+import { Logger, ValidationPipe } from '@nestjs/common';
 import { TransformInterceptor } from './common/index.js';
 import { SanitizeUserInterceptor } from './common/index.js';
 import { GlobalExceptionFilter } from './common/index.js';
@@ -41,7 +41,7 @@ async function bootstrap() {
 
   const port = process.env.PORT ?? 3001;
   await app.listen(port);
-  console.log(`Tether API running on http://localhost:${port}/api/v1`);
+  Logger.log(`Tether API running on http://localhost:${port}/api/v1`, 'Bootstrap');
 }
 
 bootstrap();

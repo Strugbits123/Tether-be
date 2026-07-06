@@ -413,17 +413,25 @@ export class PhotosService {
       throw new InternalServerErrorException('Failed to fetch folders');
     }
 
-    const foldersWithCounts = await Promise.all(
-      (folders ?? []).map(async (folder) => {
-        const { count } = await this.supabase
+    const folderIds = (folders ?? []).map((f) => f.id);
+    const { data: photoRows } = folderIds.length
+      ? await this.supabase
           .getClient()
           .from('photos')
-          .select('*', { count: 'exact', head: true })
-          .eq('folder_id', folder.id);
-
-        return { ...folder, photoCount: count ?? 0 };
-      }),
+          .select('folder_id')
+          .in('folder_id', folderIds)
+      : { data: [] };
+    const countMap = (photoRows ?? []).reduce<Record<string, number>>(
+      (acc, row) => {
+        acc[row.folder_id] = (acc[row.folder_id] ?? 0) + 1;
+        return acc;
+      },
+      {},
     );
+    const foldersWithCounts = (folders ?? []).map((folder) => ({
+      ...folder,
+      photoCount: countMap[folder.id] ?? 0,
+    }));
 
     const { count: uncategorizedCount } = await this.supabase
       .getClient()

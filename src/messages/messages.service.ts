@@ -97,7 +97,7 @@ export class MessagesService {
         title: dto.title,
       },
     );
-    this.posthog.capture(userId, 'server_message_created', { type: 'text', title: dto.title });
+    this.posthog.capture(userId, 'server_message_created', { type: 'text' });
     return message;
   }
 
@@ -156,7 +156,6 @@ export class MessagesService {
     );
     this.posthog.capture(userId, 'server_message_created', {
       type: 'video',
-      title: dto.title,
     });
 
     return {
@@ -219,7 +218,6 @@ export class MessagesService {
     );
     this.posthog.capture(userId, 'server_message_created', {
       type: 'audio',
-      title: dto.title,
     });
 
     return {
@@ -409,14 +407,16 @@ export class MessagesService {
   // ─── Reorder messages ──────────────────────────────────────────────────────
 
   async reorderMessages(userId: string, dto: ReorderMessagesDto) {
-    for (const item of dto.order) {
-      await this.supabase
-        .getClient()
-        .from('messages')
-        .update({ display_order: item.displayOrder })
-        .eq('id', item.messageId)
-        .eq('user_id', userId);
-    }
+    await Promise.all(
+      dto.order.map((item) =>
+        this.supabase
+          .getClient()
+          .from('messages')
+          .update({ display_order: item.displayOrder })
+          .eq('id', item.messageId)
+          .eq('user_id', userId),
+      ),
+    );
     return { message: 'Messages reordered' };
   }
 

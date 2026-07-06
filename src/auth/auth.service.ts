@@ -81,7 +81,6 @@ export class AuthService {
 
     if (data.user?.id) {
       this.posthog.capture(data.user.id, 'server_user_signed_up', {
-        email: data.user.email,
         provider: 'email',
       });
       this.posthog.identify(data.user.id, {

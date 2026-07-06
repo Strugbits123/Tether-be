@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Injectable,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
@@ -15,6 +16,8 @@ import { GenerateTtsDto } from './dto/generate-tts.dto.js';
 
 @Injectable()
 export class MemoirService {
+  private readonly logger = new Logger(MemoirService.name);
+
   constructor(
     private readonly supabase: SupabaseService,
     private readonly activityService: ActivityService,
@@ -169,93 +172,93 @@ export class MemoirService {
     let hasAudio = false;
     let totalWords = 0;
 
-    const enriched = await Promise.all(
-      chapterList.map(async (chapter, index) => {
-        totalWords += chapter.word_count ?? 0;
+    const chapterIds = chapterList.map((c) => c.id);
 
-        // Exhibits with signed URLs
-        const { data: exhibitRows } = await this.supabase
-          .getClient()
-          .from('chapter_exhibits')
-          .select('id, file_name, file_type, storage_path')
-          .eq('chapter_id', chapter.id)
-          .order('display_order', { ascending: true });
-
-        const exhibits: Array<{
-          id: string;
-          file_name: string;
-          file_type: string;
-          signed_url: string | null;
-        }> = [];
-        if (exhibitRows && exhibitRows.length > 0) {
-          const { data: urlData } = await this.supabase
+    // Batch-fetch all exhibits and TTS rows (2 queries instead of 2N)
+    const [{ data: allExhibits }, { data: allTtsRows }] = await Promise.all([
+      chapterIds.length
+        ? this.supabase
             .getClient()
-            .storage.from('chapter-exhibits')
-            .createSignedUrls(
-              exhibitRows.map((e: { storage_path: string }) => e.storage_path),
-              3600,
-            );
-          const urlMap = new Map(
-            (urlData ?? [])
-              .filter((u) => u.path && u.signedUrl)
-              .map((u) => [u.path as string, u.signedUrl as string]),
-          );
-          for (const e of exhibitRows) {
-            exhibits.push({
-              id: e.id,
-              file_name: e.file_name,
-              file_type: e.file_type,
-              signed_url: urlMap.get(e.storage_path) ?? null,
-            });
-          }
-        }
+            .from('chapter_exhibits')
+            .select('id, chapter_id, file_name, file_type, storage_path, display_order')
+            .in('chapter_id', chapterIds)
+            .order('display_order', { ascending: true })
+        : Promise.resolve({ data: [] as any[] }),
+      chapterIds.length
+        ? this.supabase
+            .getClient()
+            .from('chapter_tts')
+            .select('chapter_id, status, storage_path, duration_seconds')
+            .in('chapter_id', chapterIds)
+        : Promise.resolve({ data: [] as any[] }),
+    ]);
 
-        // TTS audio
-        const { data: ttsRow } = await this.supabase
-          .getClient()
-          .from('chapter_tts')
-          .select('status, storage_path, duration_seconds')
-          .eq('chapter_id', chapter.id)
-          .single();
+    // Batch signed URLs for all exhibits and ready TTS audio (2 calls instead of 2N)
+    const exhibitPaths = (allExhibits ?? []).map((e: any) => e.storage_path as string);
+    const readyTtsPaths = (allTtsRows ?? [])
+      .filter((t: any) => t.status === 'ready' && t.storage_path)
+      .map((t: any) => t.storage_path as string);
 
-        let ttsAudio: {
-          status: string;
-          playback_url: string | null;
-          duration_seconds: number | null;
-        } | null = null;
+    const [{ data: exhibitUrlData }, { data: ttsUrlData }] = await Promise.all([
+      exhibitPaths.length
+        ? this.supabase.getClient().storage.from('chapter-exhibits').createSignedUrls(exhibitPaths, 3600)
+        : Promise.resolve({ data: [] as any[] }),
+      readyTtsPaths.length
+        ? this.supabase.getClient().storage.from('chapter-audio').createSignedUrls(readyTtsPaths, 3600)
+        : Promise.resolve({ data: [] as any[] }),
+    ]);
 
-        if (ttsRow) {
-          let playbackUrl: string | null = null;
-          if (ttsRow.status === 'ready' && ttsRow.storage_path) {
-            hasAudio = true;
-            const { data: urlData } = await this.supabase
-              .getClient()
-              .storage.from('chapter-audio')
-              .createSignedUrl(ttsRow.storage_path, 3600);
-            playbackUrl = urlData?.signedUrl ?? null;
-          }
-          ttsAudio = {
-            status: ttsRow.status,
-            playback_url: playbackUrl,
-            duration_seconds: ttsRow.duration_seconds ?? null,
-          };
-        }
-
-        return {
-          chapter_number: index + 1,
-          id: chapter.id,
-          title: chapter.title,
-          date_label: chapter.date_label,
-          theme: chapter.theme,
-          type: chapter.type,
-          body: chapter.body,
-          word_count: chapter.word_count,
-          recipient_note: chapter.recipient_note ?? null,
-          exhibits,
-          tts_audio: ttsAudio,
-        };
-      }),
+    const exhibitUrlMap = new Map(
+      (exhibitUrlData ?? []).filter((u: any) => u.path && u.signedUrl).map((u: any) => [u.path as string, u.signedUrl as string]),
     );
+    const ttsUrlMap = new Map(
+      (ttsUrlData ?? []).filter((u: any) => u.path && u.signedUrl).map((u: any) => [u.path as string, u.signedUrl as string]),
+    );
+
+    const exhibitsByChapter = (allExhibits ?? []).reduce<Record<string, any[]>>((acc, e: any) => {
+      (acc[e.chapter_id] ??= []).push(e);
+      return acc;
+    }, {});
+    const ttsByChapter = (allTtsRows ?? []).reduce<Record<string, any>>((acc, t: any) => {
+      acc[t.chapter_id] = t;
+      return acc;
+    }, {});
+
+    const enriched = chapterList.map((chapter, index) => {
+      totalWords += chapter.word_count ?? 0;
+
+      const exhibits = (exhibitsByChapter[chapter.id] ?? []).map((e: any) => ({
+        id: e.id,
+        file_name: e.file_name,
+        file_type: e.file_type,
+        signed_url: exhibitUrlMap.get(e.storage_path) ?? null,
+      }));
+
+      const ttsRow = ttsByChapter[chapter.id] ?? null;
+      let ttsAudio: { status: string; playback_url: string | null; duration_seconds: number | null } | null = null;
+      if (ttsRow) {
+        if (ttsRow.status === 'ready' && ttsRow.storage_path) hasAudio = true;
+        ttsAudio = {
+          status: ttsRow.status,
+          playback_url: ttsRow.storage_path ? (ttsUrlMap.get(ttsRow.storage_path) ?? null) : null,
+          duration_seconds: ttsRow.duration_seconds ?? null,
+        };
+      }
+
+      return {
+        chapter_number: index + 1,
+        id: chapter.id,
+        title: chapter.title,
+        date_label: chapter.date_label,
+        theme: chapter.theme,
+        type: chapter.type,
+        body: chapter.body,
+        word_count: chapter.word_count,
+        recipient_note: chapter.recipient_note ?? null,
+        exhibits,
+        tts_audio: ttsAudio,
+      };
+    });
 
     return {
       title: memoir.title,
@@ -385,7 +388,7 @@ export class MemoirService {
     this.ttsService
       .generateTts(userId, chapterId, ttsRow.id, voiceModel)
       .catch((err) => {
-        console.error(`TTS generation error for chapter ${chapterId}:`, err);
+        this.logger.error(`TTS generation error for chapter ${chapterId}`, err instanceof Error ? err.stack : err);
       });
 
     return {

@@ -108,7 +108,6 @@ export class ChaptersService {
 
     this.posthog.capture(userId, 'server_chapter_created', {
       chapterId: created.id,
-      title: created.title,
       theme: created.theme,
       type: created.type,
     });
@@ -326,7 +325,6 @@ export class ChaptersService {
     if (dto.status === 'complete') {
       this.posthog.capture(userId, 'server_chapter_completed', {
         chapterId,
-        title: updated.title,
         word_count: updated.word_count,
       });
     }
@@ -429,7 +427,6 @@ export class ChaptersService {
 
     this.posthog.capture(userId, 'server_chapter_deleted', {
       chapterId,
-      title: chapter.title,
     });
 
     return { message: 'Chapter deleted successfully' };
@@ -456,16 +453,17 @@ export class ChaptersService {
       );
     }
 
-    for (const item of dto.order) {
-      const { error: updateError } = await this.supabase
-        .getClient()
-        .from('chapters')
-        .update({ display_order: item.display_order })
-        .eq('id', item.id);
-
-      if (updateError) {
-        throw new InternalServerErrorException('Failed to reorder chapters');
-      }
+    const results = await Promise.all(
+      dto.order.map((item) =>
+        this.supabase
+          .getClient()
+          .from('chapters')
+          .update({ display_order: item.display_order })
+          .eq('id', item.id),
+      ),
+    );
+    if (results.some((r) => r.error)) {
+      throw new InternalServerErrorException('Failed to reorder chapters');
     }
 
     this.activityService
@@ -820,7 +818,6 @@ export class ChaptersService {
 
     this.posthog.capture(userId, 'server_voice_chapter_created', {
       chapterId: created.id,
-      title: created.title,
       duration_seconds: dto.duration_seconds,
     });
 
@@ -1082,12 +1079,14 @@ export class ChaptersService {
 
     if (!remaining) return;
 
-    for (let i = 0; i < remaining.length; i++) {
-      await this.supabase
-        .getClient()
-        .from('chapters')
-        .update({ display_order: i })
-        .eq('id', remaining[i].id);
-    }
+    await Promise.all(
+      remaining.map((chapter, i) =>
+        this.supabase
+          .getClient()
+          .from('chapters')
+          .update({ display_order: i })
+          .eq('id', chapter.id),
+      ),
+    );
   }
 }
