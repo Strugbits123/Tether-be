@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
@@ -452,23 +453,31 @@ export class DocumentsService {
     const effective =
       assignments.length > 0 ? assignments : [{ scope: 'assign_later' }];
 
-    for (const a of effective) {
-      const { error } = await this.supabase
-        .getClient()
-        .from('content_assignments')
-        .insert({
-          user_id: userId,
-          content_type: 'document',
-          content_id: documentId,
-          assignment_scope: a.scope,
-          group_value: a.scope === 'group' ? (a.groupValue ?? null) : null,
-          recipient_id:
-            a.scope === 'individual' ? (a.recipientId ?? null) : null,
-        });
+    // Cross-tenant guard: individual recipients must belong to this user.
+    await this.assertRecipientsOwned(
+      userId,
+      effective
+        .filter((a) => a.scope === 'individual' && a.recipientId)
+        .map((a) => a.recipientId as string),
+    );
 
-      if (error) {
-        throw new InternalServerErrorException('Failed to create assignment');
-      }
+    // Single batched insert instead of one round trip per assignment.
+    const rows = effective.map((a) => ({
+      user_id: userId,
+      content_type: 'document',
+      content_id: documentId,
+      assignment_scope: a.scope,
+      group_value: a.scope === 'group' ? (a.groupValue ?? null) : null,
+      recipient_id: a.scope === 'individual' ? (a.recipientId ?? null) : null,
+    }));
+
+    const { error } = await this.supabase
+      .getClient()
+      .from('content_assignments')
+      .insert(rows);
+
+    if (error) {
+      throw new InternalServerErrorException('Failed to create assignment');
     }
 
     // Fire document_assigned only on an explicit assignment (not the implicit
@@ -481,6 +490,22 @@ export class DocumentsService {
         recipient_count: assignments.filter((a) => a.scope === 'individual')
           .length,
       });
+    }
+  }
+
+  private async assertRecipientsOwned(userId: string, recipientIds: string[]) {
+    const unique = [...new Set(recipientIds)];
+    if (unique.length === 0) return;
+    const { data } = await this.supabase
+      .getClient()
+      .from('recipients')
+      .select('id')
+      .eq('user_id', userId)
+      .in('id', unique);
+    if ((data?.length ?? 0) !== unique.length) {
+      throw new ForbiddenException(
+        'One or more recipients do not belong to this account',
+      );
     }
   }
 

@@ -35,6 +35,21 @@ function stripHtmlTags(html: string): string {
     .trim();
 }
 
+const TRANSCRIPTION_TIMEOUT_MS = 120_000;
+
+// Bounds an external call so a hang can't leave a row stuck 'processing'
+// forever — the rejection flows into the existing catch → status 'failed'.
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${ms}ms`)),
+      ms,
+    );
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 @Injectable()
 export class MessagesService {
   constructor(
@@ -548,11 +563,15 @@ export class MessagesService {
 
     try {
       const client = new DeepgramClient({ apiKey });
-      const response = await client.listen.v1.media.transcribeUrl({
-        url: muxPlaybackUrl,
-        model: 'nova-2',
-        smart_format: true,
-      });
+      const response = await withTimeout(
+        client.listen.v1.media.transcribeUrl({
+          url: muxPlaybackUrl,
+          model: 'nova-2',
+          smart_format: true,
+        }),
+        TRANSCRIPTION_TIMEOUT_MS,
+        'Deepgram video transcription',
+      );
       const r = response as unknown as {
         results?: {
           channels?: Array<{ alternatives?: Array<{ transcript?: string }> }>;
@@ -594,11 +613,15 @@ export class MessagesService {
 
     try {
       const client = new DeepgramClient({ apiKey });
-      const response = await client.listen.v1.media.transcribeUrl({
-        url: urlData.signedUrl,
-        model: 'nova-2',
-        smart_format: true,
-      });
+      const response = await withTimeout(
+        client.listen.v1.media.transcribeUrl({
+          url: urlData.signedUrl,
+          model: 'nova-2',
+          smart_format: true,
+        }),
+        TRANSCRIPTION_TIMEOUT_MS,
+        'Deepgram audio transcription',
+      );
       const r = response as unknown as {
         results?: {
           channels?: Array<{ alternatives?: Array<{ transcript?: string }> }>;
@@ -654,23 +677,31 @@ export class MessagesService {
     const effective =
       assignments.length > 0 ? assignments : [{ scope: 'assign_later' }];
 
-    for (const a of effective) {
-      const { error } = await this.supabase
-        .getClient()
-        .from('content_assignments')
-        .insert({
-          user_id: userId,
-          content_type: 'message',
-          content_id: messageId,
-          assignment_scope: a.scope,
-          group_value: a.scope === 'group' ? (a.groupValue ?? null) : null,
-          recipient_id:
-            a.scope === 'individual' ? (a.recipientId ?? null) : null,
-        });
+    // Cross-tenant guard: individual recipients must belong to this user.
+    await this.assertRecipientsOwned(
+      userId,
+      effective
+        .filter((a) => a.scope === 'individual' && a.recipientId)
+        .map((a) => a.recipientId as string),
+    );
 
-      if (error) {
-        throw new InternalServerErrorException('Failed to create assignment');
-      }
+    // Single batched insert instead of one round trip per assignment.
+    const rows = effective.map((a) => ({
+      user_id: userId,
+      content_type: 'message',
+      content_id: messageId,
+      assignment_scope: a.scope,
+      group_value: a.scope === 'group' ? (a.groupValue ?? null) : null,
+      recipient_id: a.scope === 'individual' ? (a.recipientId ?? null) : null,
+    }));
+
+    const { error } = await this.supabase
+      .getClient()
+      .from('content_assignments')
+      .insert(rows);
+
+    if (error) {
+      throw new InternalServerErrorException('Failed to create assignment');
     }
 
     // Fire message_assigned only when the user actually assigned recipients
@@ -684,6 +715,22 @@ export class MessagesService {
         recipient_count: assignments.filter((a) => a.scope === 'individual')
           .length,
       });
+    }
+  }
+
+  private async assertRecipientsOwned(userId: string, recipientIds: string[]) {
+    const unique = [...new Set(recipientIds)];
+    if (unique.length === 0) return;
+    const { data } = await this.supabase
+      .getClient()
+      .from('recipients')
+      .select('id')
+      .eq('user_id', userId)
+      .in('id', unique);
+    if ((data?.length ?? 0) !== unique.length) {
+      throw new ForbiddenException(
+        'One or more recipients do not belong to this account',
+      );
     }
   }
 

@@ -8,6 +8,13 @@ import { PostHogService } from '../shared/posthog/posthog.service.js';
 import { ScreenshotUploadUrlDto } from './dto/screenshot-upload-url.dto.js';
 import { SubmitFeedbackDto } from './dto/submit-feedback.dto.js';
 
+// Reduce a client-supplied file name to a safe basename (no path traversal).
+function sanitizeFileName(name: string): string {
+  const base = name.replace(/^.*[\\/]/, '');
+  const cleaned = base.replace(/[^A-Za-z0-9._-]/g, '_').replace(/\.{2,}/g, '.');
+  return cleaned.slice(0, 200) || 'file';
+}
+
 @Injectable()
 export class FeedbackService {
   private readonly logger = new Logger(FeedbackService.name);
@@ -20,7 +27,7 @@ export class FeedbackService {
   ) {}
 
   async getScreenshotUploadUrl(userId: string, dto: ScreenshotUploadUrlDto) {
-    const storagePath = `${userId}/${randomUUID()}-${dto.file_name}`;
+    const storagePath = `${userId}/${randomUUID()}-${sanitizeFileName(dto.file_name)}`;
 
     const { data, error } = await this.supabase
       .getClient()

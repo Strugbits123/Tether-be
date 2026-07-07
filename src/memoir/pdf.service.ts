@@ -1,6 +1,14 @@
-import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+  OnModuleDestroy,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import type { Browser } from 'puppeteer';
 import sanitizeHtml from 'sanitize-html';
+
+const RENDER_TIMEOUT_MS = 30_000;
 
 interface ChapterData {
   title: string;
@@ -17,34 +25,66 @@ interface MemoirData {
 }
 
 @Injectable()
-export class PdfService {
+export class PdfService implements OnModuleDestroy {
   private readonly logger = new Logger(PdfService.name);
+  private browser: Browser | null = null;
+  private browserPromise: Promise<Browser> | null = null;
 
   constructor(private readonly config: ConfigService) {}
 
+  // Launch Chromium once and reuse it across requests. Launching per-request
+  // (1-3s cold start + full browser process) was the main PDF bottleneck.
+  private async getBrowser(): Promise<Browser> {
+    if (this.browser) return this.browser;
+    if (!this.browserPromise) {
+      this.browserPromise = (async () => {
+        let puppeteer: typeof import('puppeteer');
+        try {
+          puppeteer = await import('puppeteer');
+        } catch {
+          throw new InternalServerErrorException(
+            'PDF generation is not available',
+          );
+        }
+        const executablePath = this.config.get<string>(
+          'PUPPETEER_EXECUTABLE_PATH',
+        );
+        const launchOptions: Record<string, unknown> = {
+          args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        };
+        if (executablePath) launchOptions.executablePath = executablePath;
+        const browser = await puppeteer.default.launch(launchOptions);
+        // If Chromium dies, drop the cached handle so the next call relaunches.
+        browser.on('disconnected', () => {
+          this.browser = null;
+          this.browserPromise = null;
+        });
+        this.browser = browser;
+        return browser;
+      })().catch((err) => {
+        this.browserPromise = null;
+        throw err;
+      });
+    }
+    return this.browserPromise;
+  }
+
+  async onModuleDestroy() {
+    if (this.browser) {
+      await this.browser.close().catch(() => undefined);
+    }
+  }
+
   async generatePdf(memoir: MemoirData): Promise<{ buffer: Buffer; filename: string }> {
-    let puppeteer: typeof import('puppeteer');
-    try {
-      puppeteer = await import('puppeteer');
-    } catch {
-      throw new InternalServerErrorException('PDF generation is not available');
-    }
-
-    const executablePath = this.config.get<string>('PUPPETEER_EXECUTABLE_PATH');
-
     const html = this.buildHtml(memoir);
-
-    const launchOptions: Record<string, unknown> = {
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    };
-    if (executablePath) {
-      launchOptions.executablePath = executablePath;
-    }
-
-    const browser = await puppeteer.default.launch(launchOptions);
+    const browser = await this.getBrowser();
+    const page = await browser.newPage();
     try {
-      const page = await browser.newPage();
-      await page.setContent(html, { waitUntil: 'load' });
+      page.setDefaultTimeout(RENDER_TIMEOUT_MS);
+      await page.setContent(html, {
+        waitUntil: 'load',
+        timeout: RENDER_TIMEOUT_MS,
+      });
 
       const pdfBuffer = await page.pdf({
         format: 'A4',
@@ -58,7 +98,7 @@ export class PdfService {
 
       return { buffer: Buffer.from(pdfBuffer), filename };
     } finally {
-      await browser.close();
+      await page.close().catch(() => undefined);
     }
   }
 

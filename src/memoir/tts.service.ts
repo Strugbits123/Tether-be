@@ -66,6 +66,7 @@ export class TtsService {
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({ text: chunk }),
+            signal: AbortSignal.timeout(60_000),
           },
         );
 

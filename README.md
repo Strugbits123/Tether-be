@@ -183,12 +183,13 @@ DELETE /messages/:id
 ### Content (protected)
 
 Read-only/bulk operations that span all content types (`message` |
-`document` | `photo` | `memoir`).
+`document` | `photo` | `chapter`). Chapters are surfaced in the UI as
+"Memoir", but the wire value on `contentType` / `counts` is `chapter`.
 
 ```
 GET  /content/unassigned        # items with no assignment (or only assign_later)
-POST /content/bulk-assign       # replace assignments across many items at once
-POST /content/bulk-delete       # delete many items across types (memoir skipped)
+POST /content/bulk-assign       # replace assignments across many items (ownership-checked)
+POST /content/bulk-delete       # delete many items across types
 ```
 
 Group assignments use `groupValue` from the recipient relationship taxonomy:
@@ -204,17 +205,60 @@ GET /activity
 
 ```
 GET  /health
-POST /webhooks/mux   # Mux server-to-server callback (signature-verified)
+POST /webhooks/mux            # Mux server-to-server callback (signature-verified)
+POST /webhooks/supabase-auth  # Supabase auth DB webhook (shared-secret verified)
 ```
 
 ## Database
 
-Supabase PostgreSQL — 28 tables, RLS enabled on all tables.
+Supabase PostgreSQL. The database is provisioned for the **full product** (~31
+tables incl. release plans, recipient delivery, guardians, payments, gift
+cards, notifications, and admin/announcements); this backend implements the
+content-creation subset (users, messages, chapters, exhibits, TTS, memoirs,
+photos & folders, documents, recipients, release managers, content
+assignments, feedback, activity log).
 
 Run migrations manually in the Supabase SQL Editor — never use automated
-migrations against production. Storage buckets: `avatars` (public, 5MB),
-`photos` (10MB), `documents` (50MB, PDF/docx/image/audio/video), and a legacy
-`audio` bucket. Bucket file-size caps are limited to 50MB by the project plan.
+migrations against production.
+
+**Storage buckets** (all private and served via short-lived signed URLs, except
+`avatars`):
+
+| Bucket | Access | Path convention |
+|---|---|---|
+| `avatars` | public | `${userId}/avatar.${ext}` |
+| `photos` | private | `${userId}/${uuid}.${ext}` |
+| `documents` | private | `${userId}/${uuid}.${ext}` |
+| `audio` | private | `${userId}/…` and `voice-chapters/${userId}/…` |
+| `chapter-exhibits` | private | `${userId}/${chapterId}/…` |
+| `chapter-audio` | private | `${userId}/${chapterId}/narration.mp3` |
+| `feedback-screenshots` | private | `${userId}/…` |
+
+**RLS:** the API accesses Postgres with the Supabase **service-role key**, which
+**bypasses RLS** — tenant isolation is enforced in the service layer via explicit
+`user_id` scoping (see Security & Reliability). An RLS backstop migration lives
+in [`db/rls-policies.sql`](./db/rls-policies.sql); applying it is safe under the
+service-role key and becomes enforcing if an anon/publishable-key path is added.
+
+## Security & Reliability
+
+Hardening enforced in code (since RLS is bypassed by the service-role key):
+
+- **Object ownership** — every id-scoped read/write is filtered by `user_id`.
+  Assignment paths validate that `recipient_id` and `folder_id` belong to the
+  caller, and `content/bulk-assign` verifies ownership of each `contentId`.
+- **Upload safety** — client-supplied `storage_path` is rejected unless prefixed
+  for the caller (`${userId}/…`); file names are reduced to a safe basename
+  (no path traversal) before building storage keys.
+- **External-call timeouts** — Deepgram transcription and TTS calls are bounded,
+  so a hung provider marks the row `failed` instead of stuck `processing`.
+- **PDF generation** — a single Chromium instance is reused across requests with
+  a render timeout and closed on shutdown, rather than launched per request.
+- **Batched writes** — content assignments insert in one round trip.
+- **Graceful shutdown** — `enableShutdownHooks()` ensures `onModuleDestroy`
+  cleanup runs (close the browser, flush buffered work).
+- **Webhooks** — `/webhooks/mux` (signature) and `/webhooks/supabase-auth`
+  (shared secret) are verified and fail closed.
 
 ## Sprint Progress
 

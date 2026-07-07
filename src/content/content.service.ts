@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   InternalServerErrorException,
 } from '@nestjs/common';
@@ -28,6 +29,15 @@ const ASSIGNMENT_TYPE: Record<string, string> = {
   document: 'document',
   photo: 'photo',
   chapter: 'chapter',
+};
+
+// Maps the public contentType to the table that owns the row, for ownership
+// verification before assigning.
+const CONTENT_TABLE: Record<string, string> = {
+  message: 'messages',
+  document: 'documents',
+  photo: 'photos',
+  chapter: 'chapters',
 };
 
 @Injectable()
@@ -175,6 +185,14 @@ export class ContentService {
   async bulkAssign(userId: string, dto: BulkAssignDto) {
     for (const item of dto.items) {
       const assignmentType = ASSIGNMENT_TYPE[item.contentType];
+      if (!assignmentType) {
+        throw new BadRequestException('Invalid content type');
+      }
+
+      // Verify the caller owns this content before (re)assigning recipients.
+      // Without this an attacker could attach delivery rules to another
+      // user's content id.
+      await this.assertContentOwned(userId, item.contentType, item.contentId);
 
       await this.supabase
         .getClient()
@@ -247,23 +265,70 @@ export class ContentService {
           'recipientId is required when scope is "individual"',
         );
       }
+    }
 
-      const { error } = await this.supabase
-        .getClient()
-        .from('content_assignments')
-        .insert({
-          user_id: userId,
-          content_type: contentType,
-          content_id: contentId,
-          assignment_scope: a.scope,
-          group_value: a.scope === 'group' ? (a.groupValue ?? null) : null,
-          recipient_id:
-            a.scope === 'individual' ? (a.recipientId ?? null) : null,
-        });
+    // Cross-tenant guard: individual recipients must belong to this user.
+    await this.assertRecipientsOwned(
+      userId,
+      effective
+        .filter((a) => a.scope === 'individual' && a.recipientId)
+        .map((a) => a.recipientId as string),
+    );
 
-      if (error) {
-        throw new InternalServerErrorException('Failed to create assignment');
-      }
+    // Single batched insert instead of one round trip per assignment.
+    const rows = effective.map((a) => ({
+      user_id: userId,
+      content_type: contentType,
+      content_id: contentId,
+      assignment_scope: a.scope,
+      group_value: a.scope === 'group' ? (a.groupValue ?? null) : null,
+      recipient_id: a.scope === 'individual' ? (a.recipientId ?? null) : null,
+    }));
+
+    const { error } = await this.supabase
+      .getClient()
+      .from('content_assignments')
+      .insert(rows);
+
+    if (error) {
+      throw new InternalServerErrorException('Failed to create assignment');
+    }
+  }
+
+  private async assertContentOwned(
+    userId: string,
+    contentType: string,
+    contentId: string,
+  ) {
+    const table = CONTENT_TABLE[contentType];
+    if (!table) throw new BadRequestException('Invalid content type');
+    const { data } = await this.supabase
+      .getClient()
+      .from(table)
+      .select('id')
+      .eq('id', contentId)
+      .eq('user_id', userId)
+      .maybeSingle();
+    if (!data) {
+      throw new ForbiddenException(
+        'Content not found or not owned by this account',
+      );
+    }
+  }
+
+  private async assertRecipientsOwned(userId: string, recipientIds: string[]) {
+    const unique = [...new Set(recipientIds)];
+    if (unique.length === 0) return;
+    const { data } = await this.supabase
+      .getClient()
+      .from('recipients')
+      .select('id')
+      .eq('user_id', userId)
+      .in('id', unique);
+    if ((data?.length ?? 0) !== unique.length) {
+      throw new ForbiddenException(
+        'One or more recipients do not belong to this account',
+      );
     }
   }
 }

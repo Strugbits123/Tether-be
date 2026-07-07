@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   InternalServerErrorException,
   Logger,
@@ -56,6 +57,29 @@ const SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
     a: ['href', 'target', 'rel'],
   },
 };
+
+// Reduce an arbitrary client-supplied file name to a safe basename — strips any
+// path components (../, absolute paths) and unsafe characters.
+function sanitizeFileName(name: string): string {
+  const base = name.replace(/^.*[\\/]/, '');
+  const cleaned = base.replace(/[^A-Za-z0-9._-]/g, '_').replace(/\.{2,}/g, '.');
+  return cleaned.slice(0, 200) || 'file';
+}
+
+const TRANSCRIPTION_TIMEOUT_MS = 120_000;
+
+// Bounds an external call so a hang can't leave a chapter stuck 'processing'
+// forever — the rejection flows into the existing catch → status 'failed'.
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${ms}ms`)),
+      ms,
+    );
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 @Injectable()
 export class ChaptersService {
@@ -485,7 +509,7 @@ export class ChaptersService {
   ) {
     await this.requireOwnedChapter(userId, chapterId);
 
-    const storagePath = `${userId}/${chapterId}/${randomUUID()}-${dto.file_name}`;
+    const storagePath = `${userId}/${chapterId}/${randomUUID()}-${sanitizeFileName(dto.file_name)}`;
 
     const { data, error } = await this.supabase
       .getClient()
@@ -508,6 +532,12 @@ export class ChaptersService {
     dto: CreateExhibitDto,
   ) {
     await this.requireOwnedChapter(userId, chapterId);
+
+    // storage_path must have been minted for THIS user+chapter — never trust a
+    // client-supplied path pointing at another tenant's object.
+    if (!dto.storage_path.startsWith(`${userId}/${chapterId}/`)) {
+      throw new ForbiddenException('storage_path does not belong to this chapter');
+    }
 
     const { data: existing } = await this.supabase
       .getClient()
@@ -640,7 +670,6 @@ export class ChaptersService {
         ? dto.assignments
         : [{ assignment_scope: 'assign_later' }];
 
-    const created: Record<string, unknown>[] = [];
     for (const a of effective) {
       if (a.assignment_scope === 'group' && !a.group_value) {
         throw new BadRequestException(
@@ -652,29 +681,36 @@ export class ChaptersService {
           'recipient_id is required when assignment_scope is "individual"',
         );
       }
+    }
 
-      const { data, error } = await this.supabase
-        .getClient()
-        .from('content_assignments')
-        .insert({
-          user_id: userId,
-          content_type: 'chapter',
-          content_id: chapterId,
-          assignment_scope: a.assignment_scope,
-          group_value:
-            a.assignment_scope === 'group' ? (a.group_value ?? null) : null,
-          recipient_id:
-            a.assignment_scope === 'individual'
-              ? (a.recipient_id ?? null)
-              : null,
-        })
-        .select('id, assignment_scope, group_value, recipient_id')
-        .single();
+    // Cross-tenant guard: every individual recipient must belong to this user.
+    await this.assertRecipientsOwned(
+      userId,
+      effective
+        .filter((a) => a.assignment_scope === 'individual' && a.recipient_id)
+        .map((a) => a.recipient_id as string),
+    );
 
-      if (error || !data) {
-        throw new InternalServerErrorException('Failed to create assignment');
-      }
-      created.push(data);
+    // Single batched insert instead of one round trip per assignment.
+    const rows = effective.map((a) => ({
+      user_id: userId,
+      content_type: 'chapter',
+      content_id: chapterId,
+      assignment_scope: a.assignment_scope,
+      group_value:
+        a.assignment_scope === 'group' ? (a.group_value ?? null) : null,
+      recipient_id:
+        a.assignment_scope === 'individual' ? (a.recipient_id ?? null) : null,
+    }));
+
+    const { data: created, error } = await this.supabase
+      .getClient()
+      .from('content_assignments')
+      .insert(rows)
+      .select('id, assignment_scope, group_value, recipient_id');
+
+    if (error || !created) {
+      throw new InternalServerErrorException('Failed to create assignment');
     }
 
     const recipientIds = created
@@ -758,7 +794,7 @@ export class ChaptersService {
       throw new BadRequestException('file_type must be an audio MIME type');
     }
 
-    const storagePath = `voice-chapters/${userId}/${randomUUID()}-${dto.file_name}`;
+    const storagePath = `voice-chapters/${userId}/${randomUUID()}-${sanitizeFileName(dto.file_name)}`;
 
     const { data, error } = await this.supabase
       .getClient()
@@ -776,6 +812,11 @@ export class ChaptersService {
   }
 
   async createVoiceChapter(userId: string, dto: CreateVoiceChapterDto) {
+    // Reject an audio path that wasn't minted for this user (cross-tenant read).
+    if (!dto.storage_path.startsWith(`voice-chapters/${userId}/`)) {
+      throw new ForbiddenException('storage_path does not belong to this user');
+    }
+
     const { data: existing } = await this.supabase
       .getClient()
       .from('chapters')
@@ -884,14 +925,18 @@ export class ChaptersService {
       if (!apiKey) throw new Error('DEEPGRAM_API_KEY not configured');
 
       const deepgram = new DeepgramClient({ apiKey });
-      const response = await deepgram.listen.v1.media.transcribeUrl({
-        url: urlData.signedUrl,
-        model: 'nova-2',
-        smart_format: true,
-        paragraphs: true,
-        punctuate: true,
-        utterances: true,
-      });
+      const response = await withTimeout(
+        deepgram.listen.v1.media.transcribeUrl({
+          url: urlData.signedUrl,
+          model: 'nova-2',
+          smart_format: true,
+          paragraphs: true,
+          punctuate: true,
+          utterances: true,
+        }),
+        TRANSCRIPTION_TIMEOUT_MS,
+        'Deepgram voice-chapter transcription',
+      );
 
       const r = response as unknown as {
         results?: {
@@ -1040,6 +1085,17 @@ export class ChaptersService {
     }
 
     return { assignmentsByChapter, recipientIds };
+  }
+
+  private async assertRecipientsOwned(userId: string, recipientIds: string[]) {
+    const unique = [...new Set(recipientIds)];
+    if (unique.length === 0) return;
+    const found = await this.recipientsService.findByIds(userId, unique);
+    if (found.length !== unique.length) {
+      throw new ForbiddenException(
+        'One or more recipients do not belong to this account',
+      );
+    }
   }
 
   private async resolveRecipientNames(userId: string, recipientIds: string[]) {
