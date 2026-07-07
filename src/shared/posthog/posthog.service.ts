@@ -1,9 +1,10 @@
-import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PostHog } from 'posthog-node';
 
 @Injectable()
 export class PostHogService implements OnModuleDestroy {
+  private readonly logger = new Logger(PostHogService.name);
   private client: PostHog | null = null;
 
   constructor(private readonly config: ConfigService) {
@@ -28,7 +29,7 @@ export class PostHogService implements OnModuleDestroy {
         },
       });
     } catch (err) {
-      console.error('PostHog capture failed:', err);
+      this.logger.error('PostHog capture failed', err instanceof Error ? err.stack : err);
     }
   }
 
@@ -41,7 +42,7 @@ export class PostHogService implements OnModuleDestroy {
         properties,
       });
     } catch (err) {
-      console.error('PostHog identify failed:', err);
+      this.logger.error('PostHog identify failed', err instanceof Error ? err.stack : err);
     }
   }
 

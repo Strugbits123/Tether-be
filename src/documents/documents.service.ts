@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
@@ -33,6 +34,7 @@ const MIME_TO_EXT: Record<string, string> = {
   'video/mp4': 'mp4',
   'video/webm': 'webm',
   'video/quicktime': 'mov',
+  'video/x-m4v': 'm4v',
   'video/x-msvideo': 'avi',
   'video/mpeg': 'mpeg',
 };
@@ -48,6 +50,15 @@ const ALL_CATEGORIES = [
   'military',
   'other',
 ] as const;
+
+// Bucketed file size for analytics — avoids sending exact byte counts while
+// still allowing size-distribution segmentation.
+function sizeBucket(bytes: number): string {
+  if (bytes < 1_048_576) return 'under_1mb'; // < 1MB
+  if (bytes < 5_242_880) return '1_5mb'; // 1–5MB
+  if (bytes < 26_214_400) return '5_25mb'; // 5–25MB
+  return 'over_25mb';
+}
 
 @Injectable()
 export class DocumentsService {
@@ -148,15 +159,16 @@ export class DocumentsService {
         () => null,
       );
 
+      // One document_secured per document so category/file_type/size_bucket
+      // are per-item (metadata only — never filename or content).
+      this.posthog.capture(userId, 'document_secured', {
+        category,
+        file_type: doc.fileType,
+        size_bucket: sizeBucket(doc.fileSizeBytes),
+      });
+
       createdDocuments.push(created);
     }
-
-    this.posthog.capture(userId, 'server_documents_uploaded', {
-      count: createdDocuments.length,
-      categories: createdDocuments.map(
-        (d) => (d as Record<string, unknown>).category,
-      ),
-    });
 
     // Mark create_message onboarding step when audio/video is uploaded,
     // since these replace the old messages audio/video upload flow.
@@ -441,23 +453,59 @@ export class DocumentsService {
     const effective =
       assignments.length > 0 ? assignments : [{ scope: 'assign_later' }];
 
-    for (const a of effective) {
-      const { error } = await this.supabase
-        .getClient()
-        .from('content_assignments')
-        .insert({
-          user_id: userId,
-          content_type: 'document',
-          content_id: documentId,
-          assignment_scope: a.scope,
-          group_value: a.scope === 'group' ? (a.groupValue ?? null) : null,
-          recipient_id:
-            a.scope === 'individual' ? (a.recipientId ?? null) : null,
-        });
+    // Cross-tenant guard: individual recipients must belong to this user.
+    await this.assertRecipientsOwned(
+      userId,
+      effective
+        .filter((a) => a.scope === 'individual' && a.recipientId)
+        .map((a) => a.recipientId as string),
+    );
 
-      if (error) {
-        throw new InternalServerErrorException('Failed to create assignment');
-      }
+    // Single batched insert instead of one round trip per assignment.
+    const rows = effective.map((a) => ({
+      user_id: userId,
+      content_type: 'document',
+      content_id: documentId,
+      assignment_scope: a.scope,
+      group_value: a.scope === 'group' ? (a.groupValue ?? null) : null,
+      recipient_id: a.scope === 'individual' ? (a.recipientId ?? null) : null,
+    }));
+
+    const { error } = await this.supabase
+      .getClient()
+      .from('content_assignments')
+      .insert(rows);
+
+    if (error) {
+      throw new InternalServerErrorException('Failed to create assignment');
+    }
+
+    // Fire document_assigned only on an explicit assignment (not the implicit
+    // 'assign_later' default). recipient_count = individually-named recipients.
+    const hasExplicitAssignment = assignments.some(
+      (a) => a.scope !== 'assign_later',
+    );
+    if (hasExplicitAssignment) {
+      this.posthog.capture(userId, 'document_assigned', {
+        recipient_count: assignments.filter((a) => a.scope === 'individual')
+          .length,
+      });
+    }
+  }
+
+  private async assertRecipientsOwned(userId: string, recipientIds: string[]) {
+    const unique = [...new Set(recipientIds)];
+    if (unique.length === 0) return;
+    const { data } = await this.supabase
+      .getClient()
+      .from('recipients')
+      .select('id')
+      .eq('user_id', userId)
+      .in('id', unique);
+    if ((data?.length ?? 0) !== unique.length) {
+      throw new ForbiddenException(
+        'One or more recipients do not belong to this account',
+      );
     }
   }
 

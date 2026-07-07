@@ -80,13 +80,23 @@ export class AuthService {
     }
 
     if (data.user?.id) {
-      this.posthog.capture(data.user.id, 'server_user_signed_up', {
-        email: data.user.email,
+      this.posthog.capture(data.user.id, 'user_signed_up', {
         provider: 'email',
+        acquisition_source: dto.acquisition_source ?? null,
+        utm_source: dto.utm_source ?? null,
+        utm_medium: dto.utm_medium ?? null,
+        utm_campaign: dto.utm_campaign ?? null,
+        utm_term: dto.utm_term ?? null,
+        utm_content: dto.utm_content ?? null,
+        referrer: dto.referrer ?? null,
       });
+      // Person profile: email is retained for support/lookups; plan_tier seeds
+      // segmentation (defaults to 'free' until billing is wired up). No names
+      // are sent as person properties — PII guardrail.
       this.posthog.identify(data.user.id, {
         email: data.user.email,
         created_at: new Date().toISOString(),
+        plan_tier: 'free',
       });
     }
 
@@ -242,5 +252,21 @@ export class AuthService {
     }
 
     return { url: data.url };
+  }
+
+  // Invoked by the Supabase auth Database Webhook (UPDATE on auth.users).
+  // Fires email_verified exactly once, on the null -> confirmed transition.
+  handleEmailVerified(payload: {
+    type?: string;
+    record?: { id?: string; email_confirmed_at?: string | null };
+    old_record?: { email_confirmed_at?: string | null };
+  }) {
+    const record = payload.record;
+    const justConfirmed =
+      !!record?.email_confirmed_at && !payload.old_record?.email_confirmed_at;
+
+    if (record?.id && justConfirmed) {
+      this.posthog.capture(record.id, 'email_verified', { provider: 'email' });
+    }
   }
 }

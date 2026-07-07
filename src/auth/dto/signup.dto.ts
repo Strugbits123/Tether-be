@@ -18,4 +18,41 @@ export class SignupDto {
   @IsString()
   @MaxLength(100)
   last_name?: string;
+
+  // Acquisition attribution — collected client-side (landing URL + referrer)
+  // and passed through so user_signed_up carries it server-side. Non-PII.
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  acquisition_source?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  utm_source?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  utm_medium?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  utm_campaign?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  utm_term?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  utm_content?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(1024)
+  referrer?: string;
 }

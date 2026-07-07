@@ -4,15 +4,15 @@ import {
   GROUP_VALUES,
 } from '../../common/constants/assignments.js';
 
-export class AssignmentDto {
+export class ChapterAssignmentDto {
   @IsIn([...ASSIGNMENT_SCOPES])
-  scope: string;
+  assignment_scope: string;
 
   @IsOptional()
   @IsIn([...GROUP_VALUES])
-  groupValue?: string | null;
+  group_value?: string | null;
 
   @IsOptional()
   @IsUUID()
-  recipientId?: string | null;
+  recipient_id?: string | null;
 }

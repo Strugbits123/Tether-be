@@ -14,6 +14,10 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
+import {
+  ASSIGNMENT_SCOPES,
+  GROUP_VALUES,
+} from '../../common/constants/assignments.js';
 
 export class PhotoItemDto {
   @IsString()
@@ -48,11 +52,11 @@ export class PhotoItemDto {
 }
 
 export class AssignmentDto {
-  @IsIn(['all', 'group', 'release_manager', 'assign_later', 'individual'])
+  @IsIn([...ASSIGNMENT_SCOPES])
   scope: string;
 
   @IsOptional()
-  @IsString()
+  @IsIn([...GROUP_VALUES])
   groupValue?: string | null;
 
   @IsOptional()

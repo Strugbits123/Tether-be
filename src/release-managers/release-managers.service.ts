@@ -77,7 +77,7 @@ export class ReleaseManagersService {
       email,
       relationship: dto.relationship,
     });
-    this.posthog.capture(userId, 'server_release_manager_designated', {
+    this.posthog.capture(userId, 'release_manager_designated', {
       relationship: dto.relationship,
     });
 
