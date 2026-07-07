@@ -60,7 +60,7 @@ export class MemoirService {
     const fieldsUpdated = Object.keys(dto).filter(
       (k) => dto[k as keyof UpdateMemoirDto] !== undefined,
     );
-    this.posthog.capture(userId, 'server_memoir_updated', {
+    this.posthog.capture(userId, 'memoir_updated', {
       memoirId: memoir.id,
       fields_updated: fieldsUpdated,
     });
@@ -144,7 +144,7 @@ export class MemoirService {
       })
       .catch(() => null);
 
-    this.posthog.capture(userId, 'server_memoir_deleted', {
+    this.posthog.capture(userId, 'memoir_deleted', {
       memoirId: memoir?.id,
       chapters_deleted: chapterIds.length,
     });
@@ -281,7 +281,7 @@ export class MemoirService {
       })
       .catch(() => null);
 
-    this.posthog.capture(userId, 'server_memoir_downloaded', {
+    this.posthog.capture(userId, 'memoir_downloaded', {
       format: 'pdf',
       chapter_count: preview.total_chapters,
       total_words: preview.total_words,
@@ -301,7 +301,7 @@ export class MemoirService {
       })
       .catch(() => null);
 
-    this.posthog.capture(userId, 'server_memoir_downloaded', {
+    this.posthog.capture(userId, 'memoir_downloaded', {
       format: 'text',
       chapter_count: preview.total_chapters,
       total_words: preview.total_words,
@@ -379,7 +379,7 @@ export class MemoirService {
       })
       .catch(() => null);
 
-    this.posthog.capture(userId, 'server_tts_generation_started', {
+    this.posthog.capture(userId, 'tts_generation_started', {
       chapterId,
       voice_model: voiceModel,
       body_length: (chapter.body as string).length,

@@ -63,14 +63,17 @@ export class UsersService {
 
       if (!wasCompleted) {
         this.activityService.log(userId, 'profile_completed', 'Profile completed', {});
-        this.posthog.capture(userId, 'server_profile_completed', {
+        this.posthog.capture(userId, 'profile_completed', {
           has_avatar: !!dto.avatar_url,
+          age_band: dto.age_group ?? null,
+          gender: dto.gender ?? null,
         });
+        // Person properties for segmentation only — no names/PII.
         this.posthog.identify(userId, {
-          first_name: dto.first_name,
-          last_name: dto.last_name,
-          state: dto.state,
-          age_group: dto.age_group,
+          state: dto.state ?? null,
+          age_band: dto.age_group ?? null,
+          gender: dto.gender ?? null,
+          plan_tier: 'free',
         });
       }
     }

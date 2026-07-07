@@ -129,9 +129,9 @@ export class PhotosService {
     }
 
     this.markOnboardingAddPhotos(userId).catch(() => null);
-    this.posthog.capture(userId, 'server_photos_uploaded', {
+    this.posthog.capture(userId, 'photo_uploaded', {
       count: createdPhotos.length,
-      folder_id: dto.folderId ?? 'uncategorized',
+      folder: dto.folderId ?? 'uncategorized',
     });
 
     this.activityService.log(

@@ -50,6 +50,15 @@ const ALL_CATEGORIES = [
   'other',
 ] as const;
 
+// Bucketed file size for analytics — avoids sending exact byte counts while
+// still allowing size-distribution segmentation.
+function sizeBucket(bytes: number): string {
+  if (bytes < 1_048_576) return 'under_1mb'; // < 1MB
+  if (bytes < 5_242_880) return '1_5mb'; // 1–5MB
+  if (bytes < 26_214_400) return '5_25mb'; // 5–25MB
+  return 'over_25mb';
+}
+
 @Injectable()
 export class DocumentsService {
   constructor(
@@ -149,15 +158,16 @@ export class DocumentsService {
         () => null,
       );
 
+      // One document_secured per document so category/file_type/size_bucket
+      // are per-item (metadata only — never filename or content).
+      this.posthog.capture(userId, 'document_secured', {
+        category,
+        file_type: doc.fileType,
+        size_bucket: sizeBucket(doc.fileSizeBytes),
+      });
+
       createdDocuments.push(created);
     }
-
-    this.posthog.capture(userId, 'server_documents_uploaded', {
-      count: createdDocuments.length,
-      categories: createdDocuments.map(
-        (d) => (d as Record<string, unknown>).category,
-      ),
-    });
 
     // Mark create_message onboarding step when audio/video is uploaded,
     // since these replace the old messages audio/video upload flow.
@@ -459,6 +469,18 @@ export class DocumentsService {
       if (error) {
         throw new InternalServerErrorException('Failed to create assignment');
       }
+    }
+
+    // Fire document_assigned only on an explicit assignment (not the implicit
+    // 'assign_later' default). recipient_count = individually-named recipients.
+    const hasExplicitAssignment = assignments.some(
+      (a) => a.scope !== 'assign_later',
+    );
+    if (hasExplicitAssignment) {
+      this.posthog.capture(userId, 'document_assigned', {
+        recipient_count: assignments.filter((a) => a.scope === 'individual')
+          .length,
+      });
     }
   }
 

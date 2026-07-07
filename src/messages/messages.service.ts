@@ -97,7 +97,11 @@ export class MessagesService {
         title: dto.title,
       },
     );
-    this.posthog.capture(userId, 'server_message_created', { type: 'text' });
+    this.posthog.capture(userId, 'message_created', {
+      type: 'text',
+      char_count: stripHtmlTags(dto.body).length,
+      duration_sec: null,
+    });
     return message;
   }
 
@@ -154,10 +158,8 @@ export class MessagesService {
         title: dto.title,
       },
     );
-    this.posthog.capture(userId, 'server_message_created', {
-      type: 'video',
-    });
-
+    // message_created for video is emitted from the Mux 'asset.ready' webhook,
+    // where the real duration_sec is known.
     return {
       messageId: message.id,
       uploadUrl: upload.url,
@@ -216,10 +218,8 @@ export class MessagesService {
         title: dto.title,
       },
     );
-    this.posthog.capture(userId, 'server_message_created', {
-      type: 'audio',
-    });
-
+    // message_created for audio is emitted on confirmUpload, where duration_sec
+    // and file size are known.
     return {
       messageId: message.id,
       signedUploadUrl: data.signedUrl,
@@ -258,6 +258,12 @@ export class MessagesService {
     if (error || !updated) {
       throw new InternalServerErrorException('Failed to confirm upload');
     }
+
+    this.posthog.capture(userId, 'message_created', {
+      type: 'audio',
+      duration_sec: updated.duration_seconds ?? null,
+      char_count: null,
+    });
 
     this.transcribeAudio(messageId, message.storage_path).catch(() => null);
     return updated;
@@ -488,9 +494,10 @@ export class MessagesService {
       this.transcribeVideo(message.id, playbackId).catch(() => null);
     }
 
-    this.posthog.capture(message.user_id, 'server_video_processed', {
+    this.posthog.capture(message.user_id, 'message_created', {
+      type: 'video',
       messageId: message.id,
-      duration_seconds: Math.round((event.data as Record<string, unknown>).duration as number ?? 0),
+      duration_sec: Math.round((data.duration as number) ?? 0),
     });
   }
 
@@ -664,6 +671,19 @@ export class MessagesService {
       if (error) {
         throw new InternalServerErrorException('Failed to create assignment');
       }
+    }
+
+    // Fire message_assigned only when the user actually assigned recipients
+    // (not the implicit 'assign_later' default). recipient_count reflects the
+    // number of individually-named recipients.
+    const hasExplicitAssignment = assignments.some(
+      (a) => a.scope !== 'assign_later',
+    );
+    if (hasExplicitAssignment) {
+      this.posthog.capture(userId, 'message_assigned', {
+        recipient_count: assignments.filter((a) => a.scope === 'individual')
+          .length,
+      });
     }
   }
 

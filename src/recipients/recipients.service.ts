@@ -68,7 +68,7 @@ export class RecipientsService {
         relationship: dto.relationship,
       },
     );
-    this.posthog.capture(userId, 'server_recipient_added', {
+    this.posthog.capture(userId, 'recipient_added', {
       relationship: dto.relationship,
     });
 

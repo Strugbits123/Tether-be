@@ -110,7 +110,7 @@ export class TtsService {
         })
         .catch(() => null);
 
-      this.posthog.capture(userId, 'server_tts_generation_completed', {
+      this.posthog.capture(userId, 'tts_generation_completed', {
         chapterId,
         duration_seconds: Math.round(estimatedDuration * 100) / 100,
         file_size_bytes: finalBuffer.length,

@@ -106,7 +106,7 @@ export class ChaptersService {
       })
       .catch(() => null);
 
-    this.posthog.capture(userId, 'server_chapter_created', {
+    this.posthog.capture(userId, 'chapter_created', {
       chapterId: created.id,
       theme: created.theme,
       type: created.type,
@@ -317,14 +317,17 @@ export class ChaptersService {
         .catch(() => null);
     }
 
-    this.posthog.capture(userId, 'server_chapter_updated', {
+    this.posthog.capture(userId, 'chapter_updated', {
       chapterId,
       fields_updated: fieldsUpdated,
     });
 
     if (dto.status === 'complete') {
-      this.posthog.capture(userId, 'server_chapter_completed', {
+      // A completed chapter is a saved memoir entry. `chapter` carries the
+      // theme (non-PII) — never the title.
+      this.posthog.capture(userId, 'memoir_entry_saved', {
         chapterId,
+        chapter: updated.theme ?? null,
         word_count: updated.word_count,
       });
     }
@@ -425,7 +428,7 @@ export class ChaptersService {
       })
       .catch(() => null);
 
-    this.posthog.capture(userId, 'server_chapter_deleted', {
+    this.posthog.capture(userId, 'chapter_deleted', {
       chapterId,
     });
 
@@ -545,7 +548,7 @@ export class ChaptersService {
       })
       .catch(() => null);
 
-    this.posthog.capture(userId, 'server_exhibit_added', {
+    this.posthog.capture(userId, 'exhibit_added', {
       chapterId,
       exhibitId: created.id,
       file_type: created.file_type,
@@ -712,7 +715,7 @@ export class ChaptersService {
       )
       .catch(() => null);
 
-    this.posthog.capture(userId, 'server_chapter_assignments_updated', {
+    this.posthog.capture(userId, 'chapter_assignments_updated', {
       chapterId,
       assignment_count: assignments.length,
       scopes: assignments.map((a) => a.assignment_scope),
@@ -816,7 +819,7 @@ export class ChaptersService {
       })
       .catch(() => null);
 
-    this.posthog.capture(userId, 'server_voice_chapter_created', {
+    this.posthog.capture(userId, 'voice_chapter_created', {
       chapterId: created.id,
       duration_seconds: dto.duration_seconds,
     });
@@ -942,7 +945,7 @@ export class ChaptersService {
         )
         .catch(() => null);
 
-      this.posthog.capture(userId, 'server_voice_chapter_transcribed', {
+      this.posthog.capture(userId, 'voice_chapter_transcribed', {
         chapterId,
         wordCount,
       });

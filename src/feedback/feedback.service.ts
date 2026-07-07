@@ -64,7 +64,7 @@ export class FeedbackService {
       })
       .catch(() => null);
 
-    this.posthog.capture(userId, 'server_feedback_submitted', {
+    this.posthog.capture(userId, 'feedback_submitted', {
       feedbackId: feedback.id,
       type: dto.type,
       location: dto.location,

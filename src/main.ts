@@ -39,6 +39,10 @@ async function bootstrap() {
 
   Sentry.setupConnectErrorHandler(app);
 
+  // Ensures PostHogService.onModuleDestroy() runs on shutdown so queued
+  // analytics events are flushed before the process exits.
+  app.enableShutdownHooks();
+
   const port = process.env.PORT ?? 3001;
   await app.listen(port);
   Logger.log(`Tether API running on http://localhost:${port}/api/v1`, 'Bootstrap');
