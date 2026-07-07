@@ -47,20 +47,41 @@ export class FeedbackService {
   async submitFeedback(userId: string, dto: SubmitFeedbackDto) {
     const body = this.buildBody(dto);
 
+    // feedback.user_email is NOT NULL — hydrate the row from the user record.
+    const { data: user } = await this.supabase
+      .getClient()
+      .from('users')
+      .select('email, first_name, last_name')
+      .eq('id', userId)
+      .single();
+
+    const userName =
+      user && (user.first_name || user.last_name)
+        ? `${user.first_name ?? ''} ${user.last_name ?? ''}`.trim()
+        : null;
+
     const { data: feedback, error } = await this.supabase
       .getClient()
       .from('feedback')
       .insert({
         user_id: userId,
+        user_email: user?.email ?? '',
+        user_name: userName,
         type: dto.type,
         body,
         page_context: dto.location ?? dto.feedback_type ?? null,
+        admin_replied: false,
         created_at: new Date().toISOString(),
       })
       .select('id, type')
       .single();
 
     if (error || !feedback) {
+      // Surface the real DB error instead of swallowing it.
+      this.logger.error(
+        `Failed to save feedback: ${error?.message ?? 'no row returned'}`,
+        error?.details ?? error?.hint ?? '',
+      );
       throw new InternalServerErrorException('Failed to save feedback');
     }
 

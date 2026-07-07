@@ -34,13 +34,21 @@ const CHAPTER_DETAIL_COLUMNS =
   'id, title, date_label, theme, type, status, word_count, display_order, body, recipient_note, audio_storage_path, audio_duration_seconds, audio_file_size_bytes, audio_mime_type, transcription_status, created_at, updated_at';
 
 const SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
+  // Includes inline formatting produced by the rich-text editor: bold (b/strong),
+  // italic (i/em), underline, strikethrough, and font colour (span[style] or the
+  // legacy <font color>). Without these the editor's styling is stripped on save
+  // and never reaches the preview.
   allowedTags: [
     'p',
     'br',
     'strong',
+    'b',
     'em',
+    'i',
     'u',
     's',
+    'span',
+    'font',
     'ul',
     'ol',
     'li',
@@ -55,6 +63,18 @@ const SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
   ],
   allowedAttributes: {
     a: ['href', 'target', 'rel'],
+    font: ['color', 'face', 'size'],
+    '*': ['style'],
+  },
+  allowedStyles: {
+    '*': {
+      color: [/.*/],
+      'background-color': [/.*/],
+      'font-weight': [/.*/],
+      'font-style': [/.*/],
+      'text-decoration': [/.*/],
+      'text-align': [/^(left|right|center|justify)$/],
+    },
   },
 };
 
