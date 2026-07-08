@@ -9,11 +9,13 @@ NestJS backend for Tether — Digital Legacy Platform
 - Cloudflare R2 (file storage)
 - Mux (video processing)
 - Deepgram Nova-2 (transcription)
+- Puppeteer / headless Chromium (memoir PDF export)
 - Stripe (payments)
 - Resend (transactional email)
 - Twilio 10DLC (SMS)
+- PostHog (`posthog-node`, server-side product analytics)
 - Sentry (error tracking)
-- Railway (hosting) (seperate environments for production and test)
+- Railway (hosting) (separate environments for production and test)
 
 ## Prerequisites
 
@@ -89,8 +91,18 @@ Every response uses one uniform envelope, so the frontend implements a single ha
 { "success": false, "statusCode": 400, "message": "...", "timestamp": "...", "path": "..." }
 ```
 
-`message` is always a string (validation failures are joined into one sentence). A global
-interceptor wraps successes; a global exception filter wraps errors.
+`message` is always a string (validation failures are joined into one sentence).
+
+Global request handling is wired in `src/main.ts`:
+
+- **`ValidationPipe`** with `whitelist` + `forbidNonWhitelisted` + `transform` — unknown
+  properties are rejected, and payloads are transformed into their DTO classes.
+- **`TransformInterceptor`** wraps every success in the envelope above;
+  **`SanitizeUserInterceptor`** strips sensitive user fields from responses.
+- **`GlobalExceptionFilter`** wraps every error in the failure envelope.
+- **CORS** is allow-listed to `FRONTEND_URL` plus the staging/production origins,
+  with credentials enabled. Sentry's Nest error handler and
+  `enableShutdownHooks()` (which flushes buffered PostHog events) are also set up here.
 
 ### Auth (public)
 
@@ -195,6 +207,56 @@ POST /content/bulk-delete       # delete many items across types
 Group assignments use `groupValue` from the recipient relationship taxonomy:
 `family` | `friend` | `partner` | `colleague` | `other`.
 
+### Chapters (protected)
+
+Memoir chapters — written (`text`) or `voice` (uploaded audio, transcribed via
+Deepgram). Exhibits are per-chapter image/file attachments. `display_order` is
+assigned atomically server-side (see Database).
+
+```
+POST   /chapters                        # create a text chapter
+GET    /chapters                        # list + memoir stats
+PATCH  /chapters/reorder
+POST   /chapters/voice/upload-url       # signed upload URL for voice audio
+POST   /chapters/voice                  # create voice chapter (kicks off transcription)
+GET    /chapters/:id
+GET    /chapters/:id/transcription      # transcription status poll
+PATCH  /chapters/:id
+PATCH  /chapters/:id/autosave
+DELETE /chapters/:id
+POST   /chapters/:id/exhibits/upload-url
+POST   /chapters/:id/exhibits
+GET    /chapters/:id/exhibits
+DELETE /chapters/:id/exhibits/:exhibitId
+POST   /chapters/:id/assignments        # replace chapter assignments (atomic)
+GET    /chapters/:id/assignments
+```
+
+### Memoir (protected)
+
+Assembles chapters into a memoir (title/dedication), exports, and per-chapter
+text-to-speech narration.
+
+```
+GET    /memoir                          # memoir + aggregate stats (auto-creates on first read)
+PATCH  /memoir                          # update title / dedication
+DELETE /memoir                          # permanent delete of the whole story (confirmation-gated)
+GET    /memoir/preview                  # full assembled preview (chapters, exhibits, TTS URLs)
+GET    /memoir/download/pdf             # rendered PDF (Puppeteer)
+GET    /memoir/download/text            # plain-text export
+GET    /memoir/tts/status               # batch TTS status across chapters
+POST   /memoir/chapters/:id/tts         # start narration for a chapter
+GET    /memoir/chapters/:id/tts         # narration status / playback URL
+DELETE /memoir/chapters/:id/tts
+```
+
+### Feedback (protected)
+
+```
+POST /feedback/screenshot-upload-url    # signed upload URL under the caller's prefix
+POST /feedback                          # submit bug report / feature request / general feedback
+```
+
 ### Activity (protected)
 
 ```
@@ -219,7 +281,16 @@ photos & folders, documents, recipients, release managers, content
 assignments, feedback, activity log).
 
 Run migrations manually in the Supabase SQL Editor — never use automated
-migrations against production.
+migrations against production. The SQL the app depends on lives in [`db/`](./db):
+
+| File | Purpose |
+|---|---|
+| `rls-policies.sql` | RLS backstop (safe under the service-role key; enforcing if an anon path is added) |
+| `atomic-functions.sql` | RPCs called via `supabase.rpc(...)`: `replace_content_assignments` (transactional assignment replace, advisory-locked per item), `insert_chapter_ordered` / `insert_exhibit_ordered` (race-free `display_order` under a per-owner advisory lock, with a DB-side chapter-ownership check on exhibits) |
+| `constraints.sql` | `unique (user_id)` on `memoirs`, backing the atomic upsert in `MemoirService` |
+
+Apply `atomic-functions.sql` and `constraints.sql` **before** deploying code that
+calls them — the RPCs and the memoir upsert fail without them.
 
 **Storage buckets** (all private and served via short-lived signed URLs, except
 `avatars`):
@@ -246,17 +317,26 @@ Hardening enforced in code (since RLS is bypassed by the service-role key):
 
 - **Object ownership** — every id-scoped read/write is filtered by `user_id`.
   Assignment paths validate that `recipient_id` and `folder_id` belong to the
-  caller, and `content/bulk-assign` verifies ownership of each `contentId`.
+  caller before any destructive delete, and `content/bulk-assign` verifies
+  ownership of each `contentId`. Ownership queries surface real DB errors as
+  500s rather than masking them as "not owned".
 - **Upload safety** — client-supplied `storage_path` is rejected unless prefixed
-  for the caller (`${userId}/…`); file names are reduced to a safe basename
-  (no path traversal) before building storage keys.
+  for the caller (`${userId}/…`) — including the feedback screenshot path used in
+  support emails; file names are reduced to a safe basename (no path traversal)
+  before building storage keys.
+- **Atomic writes** — assignment replacement and `display_order` assignment run
+  in single Postgres RPCs (transactional, advisory-locked) so a partial failure
+  or concurrent request can't leave orphaned/duplicate state; the irreversible
+  memoir delete checks every step and aborts on critical failure instead of
+  reporting false success.
 - **External-call timeouts** — Deepgram transcription and TTS calls are bounded,
   so a hung provider marks the row `failed` instead of stuck `processing`.
 - **PDF generation** — a single Chromium instance is reused across requests with
   a render timeout and closed on shutdown, rather than launched per request.
-- **Batched writes** — content assignments insert in one round trip.
+- **Response hygiene** — `ValidationPipe` rejects unknown fields;
+  `SanitizeUserInterceptor` strips sensitive user fields from every response.
 - **Graceful shutdown** — `enableShutdownHooks()` ensures `onModuleDestroy`
-  cleanup runs (close the browser, flush buffered work).
+  cleanup runs (close the browser, flush buffered PostHog events).
 - **Webhooks** — `/webhooks/mux` (signature) and `/webhooks/supabase-auth`
   (shared secret) are verified and fail closed.
 
@@ -265,5 +345,5 @@ Hardening enforced in code (since RLS is bypassed by the service-role key):
 - Sprint 1 ✅ — Auth, Dashboard, Onboarding foundation
 - Sprint 2 ✅ — Recipients, Release Managers, Messages (text/video/audio + transcription), Photos, Documents, Activity feed
 - Sprint 3 ✅ — Photo folders, content assignments, cross-type Content module (unassigned listing, bulk assign/delete)
-- Sprint 4 🔄 — Memoirs (long-form written content) — tables exist; services in progress
+- Sprint 4 ✅ — Memoir: text & voice chapters (Deepgram transcription), exhibits, per-chapter TTS narration, PDF/text export, feedback module
 - Sprint 5–10 — See sprint execution plan
