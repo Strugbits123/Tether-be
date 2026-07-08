@@ -362,6 +362,16 @@ export class DocumentsService {
     }
 
     if (dto.assignments !== undefined) {
+      // Authorize recipients BEFORE clearing the existing assignments so a
+      // cross-tenant recipientId can't wipe the document's assignments and
+      // leave it unassigned when the update aborts.
+      await this.assertRecipientsOwned(
+        userId,
+        dto.assignments
+          .filter((a) => a.scope === 'individual' && a.recipientId)
+          .map((a) => a.recipientId as string),
+      );
+
       await this.supabase
         .getClient()
         .from('content_assignments')
@@ -496,12 +506,16 @@ export class DocumentsService {
   private async assertRecipientsOwned(userId: string, recipientIds: string[]) {
     const unique = [...new Set(recipientIds)];
     if (unique.length === 0) return;
-    const { data } = await this.supabase
+    const { data, error } = await this.supabase
       .getClient()
       .from('recipients')
       .select('id')
       .eq('user_id', userId)
       .in('id', unique);
+    // Surface a real query failure as 500 instead of masking it as "not owned".
+    if (error) {
+      throw new InternalServerErrorException('Failed to verify recipients');
+    }
     if ((data?.length ?? 0) !== unique.length) {
       throw new ForbiddenException(
         'One or more recipients do not belong to this account',

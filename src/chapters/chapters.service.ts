@@ -114,31 +114,23 @@ export class ChaptersService {
   ) {}
 
   async createChapter(userId: string, dto: CreateChapterDto) {
-    const { data: existing } = await this.supabase
+    // display_order is computed and inserted atomically in one RPC so
+    // concurrent creates can't persist duplicate orders (see db/atomic-functions.sql).
+    const { data, error } = await this.supabase
       .getClient()
-      .from('chapters')
-      .select('display_order')
-      .eq('user_id', userId)
-      .order('display_order', { ascending: false })
-      .limit(1);
-
-    const nextOrder = (existing?.[0]?.display_order ?? -1) + 1;
-
-    const { data: created, error } = await this.supabase
-      .getClient()
-      .from('chapters')
-      .insert({
-        user_id: userId,
-        title: dto.title,
-        date_label: dto.date_label ?? null,
-        theme: dto.theme ?? null,
-        type: 'text',
-        status: 'draft',
-        display_order: nextOrder,
+      .rpc('insert_chapter_ordered', {
+        p_user_id: userId,
+        p_data: {
+          title: dto.title,
+          date_label: dto.date_label ?? null,
+          theme: dto.theme ?? null,
+          type: 'text',
+          status: 'draft',
+        },
       })
-      .select(CHAPTER_LIST_COLUMNS)
       .single();
 
+    const created = data as Record<string, any> | null;
     if (error || !created) {
       throw new InternalServerErrorException('Failed to create chapter');
     }
@@ -559,33 +551,25 @@ export class ChaptersService {
       throw new ForbiddenException('storage_path does not belong to this chapter');
     }
 
-    const { data: existing } = await this.supabase
+    // display_order is computed and inserted atomically in one RPC so
+    // concurrent creates can't persist duplicate orders (see db/atomic-functions.sql).
+    const { data, error } = await this.supabase
       .getClient()
-      .from('chapter_exhibits')
-      .select('display_order')
-      .eq('chapter_id', chapterId)
-      .order('display_order', { ascending: false })
-      .limit(1);
-
-    const nextOrder = (existing?.[0]?.display_order ?? -1) + 1;
-
-    const { data: created, error } = await this.supabase
-      .getClient()
-      .from('chapter_exhibits')
-      .insert({
-        chapter_id: chapterId,
-        user_id: userId,
-        file_name: dto.file_name,
-        storage_path: dto.storage_path,
-        file_type: dto.file_type ?? null,
-        file_size_bytes: dto.file_size_bytes ?? null,
-        width: dto.width ?? null,
-        height: dto.height ?? null,
-        display_order: nextOrder,
+      .rpc('insert_exhibit_ordered', {
+        p_chapter_id: chapterId,
+        p_user_id: userId,
+        p_data: {
+          file_name: dto.file_name,
+          storage_path: dto.storage_path,
+          file_type: dto.file_type ?? null,
+          file_size_bytes: dto.file_size_bytes ?? null,
+          width: dto.width ?? null,
+          height: dto.height ?? null,
+        },
       })
-      .select('*')
       .single();
 
+    const created = data as Record<string, any> | null;
     if (error || !created) {
       throw new InternalServerErrorException('Failed to save exhibit');
     }
@@ -674,13 +658,6 @@ export class ChaptersService {
   ) {
     await this.requireOwnedChapter(userId, chapterId);
 
-    await this.supabase
-      .getClient()
-      .from('content_assignments')
-      .delete()
-      .eq('content_type', 'chapter')
-      .eq('content_id', chapterId);
-
     const hasAssignLater = dto.assignments.some(
       (a) => a.assignment_scope === 'assign_later',
     );
@@ -711,11 +688,7 @@ export class ChaptersService {
         .map((a) => a.recipient_id as string),
     );
 
-    // Single batched insert instead of one round trip per assignment.
     const rows = effective.map((a) => ({
-      user_id: userId,
-      content_type: 'chapter',
-      content_id: chapterId,
       assignment_scope: a.assignment_scope,
       group_value:
         a.assignment_scope === 'group' ? (a.group_value ?? null) : null,
@@ -723,12 +696,19 @@ export class ChaptersService {
         a.assignment_scope === 'individual' ? (a.recipient_id ?? null) : null,
     }));
 
-    const { data: created, error } = await this.supabase
+    // Delete the old assignments and insert the replacement atomically. If the
+    // insert fails the delete rolls back, so the chapter is never left with no
+    // assignments (unlike a delete-then-insert pair of round trips).
+    const { data, error } = await this.supabase
       .getClient()
-      .from('content_assignments')
-      .insert(rows)
-      .select('id, assignment_scope, group_value, recipient_id');
+      .rpc('replace_content_assignments', {
+        p_user_id: userId,
+        p_content_type: 'chapter',
+        p_content_id: chapterId,
+        p_rows: rows,
+      });
 
+    const created = data as Array<Record<string, any>> | null;
     if (error || !created) {
       throw new InternalServerErrorException('Failed to create assignment');
     }
@@ -837,38 +817,28 @@ export class ChaptersService {
       throw new ForbiddenException('storage_path does not belong to this user');
     }
 
-    const { data: existing } = await this.supabase
+    // display_order is computed and inserted atomically in one RPC so
+    // concurrent creates can't persist duplicate orders (see db/atomic-functions.sql).
+    const { data, error } = await this.supabase
       .getClient()
-      .from('chapters')
-      .select('display_order')
-      .eq('user_id', userId)
-      .order('display_order', { ascending: false })
-      .limit(1);
-
-    const nextOrder = (existing?.[0]?.display_order ?? -1) + 1;
-
-    const { data: created, error } = await this.supabase
-      .getClient()
-      .from('chapters')
-      .insert({
-        user_id: userId,
-        title: dto.title,
-        date_label: dto.date_label ?? null,
-        theme: dto.theme ?? null,
-        type: 'voice',
-        status: 'draft',
-        display_order: nextOrder,
-        audio_storage_path: dto.storage_path,
-        audio_duration_seconds: dto.duration_seconds ?? null,
-        audio_file_size_bytes: dto.file_size_bytes,
-        audio_mime_type: dto.file_type,
-        transcription_status: 'pending',
+      .rpc('insert_chapter_ordered', {
+        p_user_id: userId,
+        p_data: {
+          title: dto.title,
+          date_label: dto.date_label ?? null,
+          theme: dto.theme ?? null,
+          type: 'voice',
+          status: 'draft',
+          audio_storage_path: dto.storage_path,
+          audio_duration_seconds: dto.duration_seconds ?? null,
+          audio_file_size_bytes: dto.file_size_bytes,
+          audio_mime_type: dto.file_type,
+          transcription_status: 'pending',
+        },
       })
-      .select(
-        'id, title, date_label, theme, type, status, transcription_status, audio_duration_seconds, display_order, created_at',
-      )
       .single();
 
+    const created = data as Record<string, any> | null;
     if (error || !created) {
       throw new InternalServerErrorException('Failed to create voice chapter');
     }

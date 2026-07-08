@@ -244,19 +244,22 @@ export class PhotosService {
     }
 
     if (dto.assignments !== undefined) {
-      await this.supabase
-        .getClient()
-        .from('content_assignments')
-        .delete()
-        .eq('content_type', 'photo')
-        .eq('content_id', photoId);
-
+      // Authorize recipients BEFORE clearing the existing assignments — a
+      // cross-tenant recipientId must not be able to wipe the photo's current
+      // assignments and leave it unassigned.
       await this.assertRecipientsOwned(
         userId,
         dto.assignments
           .filter((a) => a.scope === 'individual' && a.recipientId)
           .map((a) => a.recipientId as string),
       );
+
+      await this.supabase
+        .getClient()
+        .from('content_assignments')
+        .delete()
+        .eq('content_type', 'photo')
+        .eq('content_id', photoId);
 
       const assignmentRows = dto.assignments.map((assignment) => ({
         user_id: userId,
@@ -512,6 +515,16 @@ export class PhotosService {
 
     // Replace the folder's recipient assignments only when the caller sent them.
     if (dto.assignments) {
+      // Cross-tenant guard: individual recipients must belong to this user.
+      // Runs before the delete so an unauthorized recipient can't clear the
+      // folder's existing assignments.
+      await this.assertRecipientsOwned(
+        userId,
+        dto.assignments
+          .filter((a) => a.scope === 'individual' && a.recipientId)
+          .map((a) => a.recipientId as string),
+      );
+
       const { error: deleteError } = await this.supabase
         .getClient()
         .from('content_assignments')
@@ -583,12 +596,16 @@ export class PhotosService {
   private async assertRecipientsOwned(userId: string, recipientIds: string[]) {
     const unique = [...new Set(recipientIds)];
     if (unique.length === 0) return;
-    const { data } = await this.supabase
+    const { data, error } = await this.supabase
       .getClient()
       .from('recipients')
       .select('id')
       .eq('user_id', userId)
       .in('id', unique);
+    // Surface a real query failure as 500 instead of masking it as "not owned".
+    if (error) {
+      throw new InternalServerErrorException('Failed to verify recipients');
+    }
     if ((data?.length ?? 0) !== unique.length) {
       throw new ForbiddenException(
         'One or more recipients do not belong to this account',

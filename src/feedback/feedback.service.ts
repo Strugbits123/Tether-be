@@ -47,16 +47,25 @@ export class FeedbackService {
   async submitFeedback(userId: string, dto: SubmitFeedbackDto) {
     const body = this.buildBody(dto);
 
-    // feedback.user_email is NOT NULL — hydrate the row from the user record.
-    const { data: user } = await this.supabase
+    // feedback.user_email is NOT NULL by business intent — hydrate the row from
+    // the user record. Surface a lookup failure (or a missing email) instead of
+    // silently persisting an empty/incorrect email.
+    const { data: user, error: userError } = await this.supabase
       .getClient()
       .from('users')
       .select('email, first_name, last_name')
       .eq('id', userId)
       .single();
 
+    if (userError || !user?.email) {
+      this.logger.error(
+        `Failed to load user ${userId} for feedback: ${userError?.message ?? 'no email on record'}`,
+      );
+      throw new InternalServerErrorException('Failed to submit feedback');
+    }
+
     const userName =
-      user && (user.first_name || user.last_name)
+      user.first_name || user.last_name
         ? `${user.first_name ?? ''} ${user.last_name ?? ''}`.trim()
         : null;
 
@@ -65,7 +74,7 @@ export class FeedbackService {
       .from('feedback')
       .insert({
         user_id: userId,
-        user_email: user?.email ?? '',
+        user_email: user.email,
         user_name: userName,
         type: dto.type,
         body,
@@ -159,7 +168,11 @@ export class FeedbackService {
     const userEmail = user?.email ?? '';
 
     let screenshotHtml = '';
-    if (dto.screenshot_path) {
+    // Only mint a signed URL for an object the caller actually owns — the path
+    // must live under their own `${userId}/` prefix (the same prefix
+    // getScreenshotUploadUrl enforces). A client-supplied path pointing at
+    // another object in the bucket is ignored, not signed.
+    if (dto.screenshot_path && dto.screenshot_path.startsWith(`${userId}/`)) {
       const { data: urlData } = await this.supabase
         .getClient()
         .storage.from('feedback-screenshots')
@@ -167,6 +180,10 @@ export class FeedbackService {
       if (urlData?.signedUrl) {
         screenshotHtml = `<p><strong>Screenshot:</strong> <a href="${urlData.signedUrl}">View screenshot</a></p>`;
       }
+    } else if (dto.screenshot_path) {
+      this.logger.warn(
+        `Ignoring screenshot_path outside caller's prefix for user ${userId}`,
+      );
     }
 
     const subject = this.buildSubject(dto, userName);
