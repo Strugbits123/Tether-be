@@ -26,9 +26,21 @@ create or replace function replace_content_assignments(
 language plpgsql
 as $$
 begin
+  -- Serialise concurrent replacements of the SAME content item. Without this,
+  -- two transactional calls can still interleave their DELETE/INSERT and leave
+  -- a merged assignment set rather than a true replacement. The lock is keyed
+  -- by content_type + content_id and held until commit.
+  perform pg_advisory_xact_lock(
+    hashtext('content_assignments:' || p_content_type),
+    hashtext(p_content_id::text)
+  );
+
+  -- Scope the delete to the owner as well as the content id, so a caller can
+  -- never clear another user's assignments for a known content_id.
   delete from content_assignments
     where content_type = p_content_type
-      and content_id = p_content_id;
+      and content_id = p_content_id
+      and user_id = p_user_id;
 
   return query
     insert into content_assignments (
@@ -92,6 +104,17 @@ create or replace function insert_exhibit_ordered(
 language plpgsql
 as $$
 begin
+  -- DB-side ownership check: the chapter must belong to p_user_id. This is a
+  -- backstop so the RPC can't attach exhibits to another user's chapter even
+  -- if an upstream service-layer guard regresses.
+  if not exists (
+    select 1 from chapters
+      where id = p_chapter_id and user_id = p_user_id
+  ) then
+    raise exception 'chapter % does not belong to user %', p_chapter_id, p_user_id
+      using errcode = 'check_violation';
+  end if;
+
   perform pg_advisory_xact_lock(hashtext('exhibits_display_order'), hashtext(p_chapter_id::text));
 
   return query
