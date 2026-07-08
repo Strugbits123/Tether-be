@@ -93,7 +93,16 @@ export class MemoirService {
         (e: { storage_path: string }) => e.storage_path,
       );
       if (exhibitPaths.length > 0) {
-        await supabase.storage.from('chapter-exhibits').remove(exhibitPaths);
+        const { error } = await supabase.storage
+          .from('chapter-exhibits')
+          .remove(exhibitPaths);
+        // Orphaned storage files are non-critical (the DB rows still go away),
+        // so log and continue rather than aborting the whole deletion.
+        if (error) {
+          this.logger.warn(
+            `Failed to remove exhibit files for user ${userId}: ${error.message}`,
+          );
+        }
       }
 
       // Delete TTS audio files
@@ -106,7 +115,14 @@ export class MemoirService {
         (t: { storage_path: string }) => t.storage_path,
       );
       if (ttsPaths.length > 0) {
-        await supabase.storage.from('chapter-audio').remove(ttsPaths);
+        const { error } = await supabase.storage
+          .from('chapter-audio')
+          .remove(ttsPaths);
+        if (error) {
+          this.logger.warn(
+            `Failed to remove TTS audio for user ${userId}: ${error.message}`,
+          );
+        }
       }
 
       // Delete voice recording files
@@ -114,19 +130,41 @@ export class MemoirService {
         .filter((c: { audio_storage_path?: string | null }) => c.audio_storage_path)
         .map((c: { audio_storage_path: string }) => c.audio_storage_path);
       if (voicePaths.length > 0) {
-        await supabase.storage.from('audio').remove(voicePaths);
+        const { error } = await supabase.storage.from('audio').remove(voicePaths);
+        if (error) {
+          this.logger.warn(
+            `Failed to remove voice recordings for user ${userId}: ${error.message}`,
+          );
+        }
       }
 
-      // Delete assignments
-      await supabase
+      // Delete assignments — critical: a failure here would leave assignment
+      // rows pointing at chapters we're about to delete, so abort.
+      const { error: assignmentError } = await supabase
         .from('content_assignments')
         .delete()
         .eq('content_type', 'chapter')
         .in('content_id', chapterIds);
+      if (assignmentError) {
+        this.logger.error(
+          `Failed to delete chapter assignments for user ${userId}: ${assignmentError.message}`,
+        );
+        throw new InternalServerErrorException('Failed to delete story');
+      }
     }
 
-    // Delete all chapters (cascades chapter_tts and chapter_exhibits rows)
-    await supabase.from('chapters').delete().eq('user_id', userId);
+    // Delete all chapters (cascades chapter_tts and chapter_exhibits rows).
+    // Critical: abort on failure so we never report success with surviving rows.
+    const { error: chaptersError } = await supabase
+      .from('chapters')
+      .delete()
+      .eq('user_id', userId);
+    if (chaptersError) {
+      this.logger.error(
+        `Failed to delete chapters for user ${userId}: ${chaptersError.message}`,
+      );
+      throw new InternalServerErrorException('Failed to delete story');
+    }
 
     // Delete memoir row
     const { data: memoir } = await supabase
@@ -135,7 +173,16 @@ export class MemoirService {
       .eq('user_id', userId)
       .single();
 
-    await supabase.from('memoirs').delete().eq('user_id', userId);
+    const { error: memoirError } = await supabase
+      .from('memoirs')
+      .delete()
+      .eq('user_id', userId);
+    if (memoirError) {
+      this.logger.error(
+        `Failed to delete memoir row for user ${userId}: ${memoirError.message}`,
+      );
+      throw new InternalServerErrorException('Failed to delete story');
+    }
 
     this.activityService
       .log(userId, 'memoir_deleted', 'Deleted entire story', {
@@ -523,27 +570,24 @@ export class MemoirService {
   // ─── Private helpers ─────────────────────────────────────────────────────────
 
   private async upsertMemoir(userId: string) {
-    const { data: existing } = await this.supabase
+    // Single atomic upsert on the unique user_id, so two concurrent first-time
+    // requests can't double-create rows or have one fail. ignoreDuplicates is
+    // intentionally NOT set: on conflict we want the existing row returned, not
+    // an empty result. onConflict only touches user_id, leaving any existing
+    // title/dedication untouched. Requires a UNIQUE constraint on
+    // memoirs.user_id (see db/constraints.sql).
+    const { data, error } = await this.supabase
       .getClient()
       .from('memoirs')
-      .select('*')
-      .eq('user_id', userId)
-      .single();
-
-    if (existing) return existing;
-
-    const { data: created, error } = await this.supabase
-      .getClient()
-      .from('memoirs')
-      .insert({ user_id: userId })
+      .upsert({ user_id: userId }, { onConflict: 'user_id' })
       .select('*')
       .single();
 
-    if (error || !created) {
+    if (error || !data) {
       throw new InternalServerErrorException('Failed to initialise memoir');
     }
 
-    return created;
+    return data;
   }
 
   private async buildStats(userId: string) {
