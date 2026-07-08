@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
 import {
+  ForbiddenException,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
@@ -68,10 +69,22 @@ export class PhotosService {
   }
 
   async createBatch(userId: string, dto: CreatePhotosBatchDto) {
+    // Reject a folder that doesn't belong to this user (cross-tenant guard).
+    if (dto.folderId) {
+      await this.requireOwnedFolder(userId, dto.folderId);
+    }
+
     const effectiveAssignments: AssignmentDto[] =
       dto.assignments.length > 0
         ? dto.assignments
         : [{ scope: 'assign_later' }];
+
+    await this.assertRecipientsOwned(
+      userId,
+      effectiveAssignments
+        .filter((a) => a.scope === 'individual' && a.recipientId)
+        .map((a) => a.recipientId as string),
+    );
 
     const createdPhotos: Record<string, unknown>[] = [];
 
@@ -99,39 +112,37 @@ export class PhotosService {
         throw new InternalServerErrorException('Failed to save photo record');
       }
 
-      for (const assignment of effectiveAssignments) {
-        const { error: assignError } = await this.supabase
-          .getClient()
-          .from('content_assignments')
-          .insert({
-            user_id: userId,
-            content_type: 'photo',
-            content_id: createdPhoto.id,
-            assignment_scope: assignment.scope,
-            group_value:
-              assignment.scope === 'group'
-                ? (assignment.groupValue ?? null)
-                : null,
-            recipient_id:
-              assignment.scope === 'individual'
-                ? (assignment.recipientId ?? null)
-                : null,
-          });
+      const assignmentRows = effectiveAssignments.map((assignment) => ({
+        user_id: userId,
+        content_type: 'photo',
+        content_id: createdPhoto.id,
+        assignment_scope: assignment.scope,
+        group_value:
+          assignment.scope === 'group' ? (assignment.groupValue ?? null) : null,
+        recipient_id:
+          assignment.scope === 'individual'
+            ? (assignment.recipientId ?? null)
+            : null,
+      }));
 
-        if (assignError) {
-          throw new InternalServerErrorException(
-            'Failed to save content assignment',
-          );
-        }
+      const { error: assignError } = await this.supabase
+        .getClient()
+        .from('content_assignments')
+        .insert(assignmentRows);
+
+      if (assignError) {
+        throw new InternalServerErrorException(
+          'Failed to save content assignment',
+        );
       }
 
       createdPhotos.push(createdPhoto);
     }
 
     this.markOnboardingAddPhotos(userId).catch(() => null);
-    this.posthog.capture(userId, 'server_photos_uploaded', {
+    this.posthog.capture(userId, 'photo_uploaded', {
       count: createdPhotos.length,
-      folder_id: dto.folderId ?? 'uncategorized',
+      folder: dto.folderId ?? 'uncategorized',
     });
 
     this.activityService.log(
@@ -233,6 +244,16 @@ export class PhotosService {
     }
 
     if (dto.assignments !== undefined) {
+      // Authorize recipients BEFORE clearing the existing assignments — a
+      // cross-tenant recipientId must not be able to wipe the photo's current
+      // assignments and leave it unassigned.
+      await this.assertRecipientsOwned(
+        userId,
+        dto.assignments
+          .filter((a) => a.scope === 'individual' && a.recipientId)
+          .map((a) => a.recipientId as string),
+      );
+
       await this.supabase
         .getClient()
         .from('content_assignments')
@@ -240,24 +261,24 @@ export class PhotosService {
         .eq('content_type', 'photo')
         .eq('content_id', photoId);
 
-      for (const assignment of dto.assignments) {
+      const assignmentRows = dto.assignments.map((assignment) => ({
+        user_id: userId,
+        content_type: 'photo',
+        content_id: photoId,
+        assignment_scope: assignment.scope,
+        group_value:
+          assignment.scope === 'group' ? (assignment.groupValue ?? null) : null,
+        recipient_id:
+          assignment.scope === 'individual'
+            ? (assignment.recipientId ?? null)
+            : null,
+      }));
+
+      if (assignmentRows.length > 0) {
         const { error: assignError } = await this.supabase
           .getClient()
           .from('content_assignments')
-          .insert({
-            user_id: userId,
-            content_type: 'photo',
-            content_id: photoId,
-            assignment_scope: assignment.scope,
-            group_value:
-              assignment.scope === 'group'
-                ? (assignment.groupValue ?? null)
-                : null,
-            recipient_id:
-              assignment.scope === 'individual'
-                ? (assignment.recipientId ?? null)
-                : null,
-          });
+          .insert(assignmentRows);
 
         if (assignError) {
           throw new InternalServerErrorException('Failed to update assignment');
@@ -413,17 +434,56 @@ export class PhotosService {
       throw new InternalServerErrorException('Failed to fetch folders');
     }
 
-    const foldersWithCounts = await Promise.all(
-      (folders ?? []).map(async (folder) => {
-        const { count } = await this.supabase
+    const folderIds = (folders ?? []).map((f) => f.id);
+    const { data: photoRows } = folderIds.length
+      ? await this.supabase
           .getClient()
           .from('photos')
-          .select('*', { count: 'exact', head: true })
-          .eq('folder_id', folder.id);
-
-        return { ...folder, photoCount: count ?? 0 };
-      }),
+          .select('folder_id')
+          .in('folder_id', folderIds)
+      : { data: [] };
+    const countMap = (photoRows ?? []).reduce<Record<string, number>>(
+      (acc, row) => {
+        acc[row.folder_id] = (acc[row.folder_id] ?? 0) + 1;
+        return acc;
+      },
+      {},
     );
+
+    // Batch-fetch every folder's recipient assignments in one query so the edit
+    // modal can pre-fill the current selection.
+    const { data: assignmentRows } = folderIds.length
+      ? await this.supabase
+          .getClient()
+          .from('content_assignments')
+          .select('content_id, assignment_scope, group_value, recipient_id')
+          .eq('user_id', userId)
+          .eq('content_type', 'photo_folder')
+          .in('content_id', folderIds)
+      : { data: [] };
+    const assignmentsMap = (assignmentRows ?? []).reduce<
+      Record<
+        string,
+        {
+          assignment_scope: string;
+          group_value: string | null;
+          recipient_id: string | null;
+        }[]
+      >
+    >((acc, row) => {
+      (acc[row.content_id] ??= []).push({
+        assignment_scope: row.assignment_scope,
+        group_value: row.group_value,
+        recipient_id: row.recipient_id,
+      });
+      return acc;
+    }, {});
+
+    const foldersWithCounts = (folders ?? []).map((folder) => ({
+      ...folder,
+      photoCount: countMap[folder.id] ?? 0,
+      assignments: assignmentsMap[folder.id] ?? [],
+    }));
 
     const { count: uncategorizedCount } = await this.supabase
       .getClient()
@@ -453,6 +513,61 @@ export class PhotosService {
       throw new InternalServerErrorException('Failed to rename folder');
     }
 
+    // Replace the folder's recipient assignments only when the caller sent them.
+    if (dto.assignments) {
+      // Cross-tenant guard: individual recipients must belong to this user.
+      // Runs before the delete so an unauthorized recipient can't clear the
+      // folder's existing assignments.
+      await this.assertRecipientsOwned(
+        userId,
+        dto.assignments
+          .filter((a) => a.scope === 'individual' && a.recipientId)
+          .map((a) => a.recipientId as string),
+      );
+
+      const { error: deleteError } = await this.supabase
+        .getClient()
+        .from('content_assignments')
+        .delete()
+        .eq('user_id', userId)
+        .eq('content_type', 'photo_folder')
+        .eq('content_id', folderId);
+
+      if (deleteError) {
+        throw new InternalServerErrorException(
+          'Failed to update folder assignments',
+        );
+      }
+
+      if (dto.assignments.length > 0) {
+        const rows = dto.assignments.map((assignment) => ({
+          user_id: userId,
+          content_type: 'photo_folder',
+          content_id: folderId,
+          assignment_scope: assignment.scope,
+          group_value:
+            assignment.scope === 'group'
+              ? (assignment.groupValue ?? null)
+              : null,
+          recipient_id:
+            assignment.scope === 'individual'
+              ? (assignment.recipientId ?? null)
+              : null,
+        }));
+
+        const { error: insertError } = await this.supabase
+          .getClient()
+          .from('content_assignments')
+          .insert(rows);
+
+        if (insertError) {
+          throw new InternalServerErrorException(
+            'Failed to save folder assignments',
+          );
+        }
+      }
+    }
+
     return updated;
   }
 
@@ -476,6 +591,26 @@ export class PhotosService {
     }
 
     return { success: true };
+  }
+
+  private async assertRecipientsOwned(userId: string, recipientIds: string[]) {
+    const unique = [...new Set(recipientIds)];
+    if (unique.length === 0) return;
+    const { data, error } = await this.supabase
+      .getClient()
+      .from('recipients')
+      .select('id')
+      .eq('user_id', userId)
+      .in('id', unique);
+    // Surface a real query failure as 500 instead of masking it as "not owned".
+    if (error) {
+      throw new InternalServerErrorException('Failed to verify recipients');
+    }
+    if ((data?.length ?? 0) !== unique.length) {
+      throw new ForbiddenException(
+        'One or more recipients do not belong to this account',
+      );
+    }
   }
 
   private async requireOwnedPhoto(userId: string, photoId: string) {

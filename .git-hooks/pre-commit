@@ -1,7 +1,11 @@
 #!/bin/sh
 # Block accidental commits of .env files containing real secrets.
-if git diff --cached --name-only | grep -qE '(^|/)\.env(\.|$)'; then
+# Template files (.env.example) are safe placeholders.
+staged=$(git diff --cached --name-only \
+  | grep -E '(^|/)\.env(\.|$)' \
+  | grep -vE '\.(example)$')
+if [ -n "$staged" ]; then
   echo "ERROR: Attempted to commit a .env file. Remove it from staging:"
-  echo "  git reset HEAD <file>"
+  echo "$staged" | sed 's/^/  git reset HEAD /'
   exit 1
 fi

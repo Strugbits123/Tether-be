@@ -1,13 +1,15 @@
 import { IsIn, IsOptional, IsUUID } from 'class-validator';
+import {
+  ASSIGNMENT_SCOPES,
+  GROUP_VALUES,
+} from '../../common/constants/assignments.js';
 
 export class AssignmentDto {
-  @IsIn(['all', 'group', 'release_manager', 'assign_later', 'individual'])
+  @IsIn([...ASSIGNMENT_SCOPES])
   scope: string;
 
-  // Group values mirror the recipient RelationshipType enum so a "group"
-  // assignment can target recipients by relationship.
   @IsOptional()
-  @IsIn(['family', 'friend', 'partner', 'colleague', 'other'])
+  @IsIn([...GROUP_VALUES])
   groupValue?: string | null;
 
   @IsOptional()
