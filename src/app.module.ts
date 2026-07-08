@@ -8,6 +8,7 @@ const REQUIRED_ENV_VARS = [
   'MUX_TOKEN_ID',
   'MUX_TOKEN_SECRET',
   'POSTHOG_API_KEY',
+  'DEEPGRAM_API_KEY',
 ] as const;
 
 const validateEnv: ConfigModuleOptions['validate'] = (config: Record<string, unknown>) => {

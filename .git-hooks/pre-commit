@@ -1,6 +1,6 @@
 #!/bin/sh
 # Block accidental commits of .env files containing real secrets.
-# Template files (.env.example / .sample / .template) are safe placeholders.
+# Template files (.env.example) are safe placeholders.
 staged=$(git diff --cached --name-only \
   | grep -E '(^|/)\.env(\.|$)' \
   | grep -vE '\.(example)$')

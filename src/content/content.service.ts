@@ -183,11 +183,29 @@ export class ContentService {
   }
 
   async bulkAssign(userId: string, dto: BulkAssignDto) {
+    // Validate content types up front so a bad type can't delete some items'
+    // assignments before failing partway through the batch.
     for (const item of dto.items) {
-      const assignmentType = ASSIGNMENT_TYPE[item.contentType];
-      if (!assignmentType) {
+      if (!ASSIGNMENT_TYPE[item.contentType]) {
         throw new BadRequestException('Invalid content type');
       }
+    }
+
+    // `dto.assignments` is identical for every item, so validate the scope /
+    // groupValue / recipientId shape and authorize recipient ownership ONCE,
+    // before any delete. Otherwise a malformed or cross-tenant request would
+    // wipe an item's existing assignments and then abort with no rollback,
+    // leaving it silently unassigned.
+    const effective = this.validateAssignments(dto.assignments);
+    await this.assertRecipientsOwned(
+      userId,
+      effective
+        .filter((a) => a.scope === 'individual' && a.recipientId)
+        .map((a) => a.recipientId as string),
+    );
+
+    for (const item of dto.items) {
+      const assignmentType = ASSIGNMENT_TYPE[item.contentType];
 
       // Verify the caller owns this content before (re)assigning recipients.
       // Without this an attacker could attach delivery rules to another
@@ -202,11 +220,11 @@ export class ContentService {
         .eq('content_type', assignmentType)
         .eq('content_id', item.contentId);
 
-      await this.createAssignments(
+      await this.insertAssignments(
         userId,
         assignmentType,
         item.contentId,
-        dto.assignments,
+        effective,
       );
     }
 
@@ -243,12 +261,10 @@ export class ContentService {
     return { deleted, skipped };
   }
 
-  private async createAssignments(
-    userId: string,
-    contentType: string,
-    contentId: string,
-    assignments: AssignmentDto[],
-  ) {
+  // Validates the scope/groupValue/recipientId shape and returns the effective
+  // assignment list (defaulting to a single 'assign_later' row when empty).
+  // Pure — no DB writes — so callers can run it before any destructive delete.
+  private validateAssignments(assignments: AssignmentDto[]): AssignmentDto[] {
     const effective =
       assignments.length > 0 ? assignments : [{ scope: 'assign_later' }];
 
@@ -267,14 +283,15 @@ export class ContentService {
       }
     }
 
-    // Cross-tenant guard: individual recipients must belong to this user.
-    await this.assertRecipientsOwned(
-      userId,
-      effective
-        .filter((a) => a.scope === 'individual' && a.recipientId)
-        .map((a) => a.recipientId as string),
-    );
+    return effective;
+  }
 
+  private async insertAssignments(
+    userId: string,
+    contentType: string,
+    contentId: string,
+    effective: AssignmentDto[],
+  ) {
     // Single batched insert instead of one round trip per assignment.
     const rows = effective.map((a) => ({
       user_id: userId,
@@ -302,13 +319,17 @@ export class ContentService {
   ) {
     const table = CONTENT_TABLE[contentType];
     if (!table) throw new BadRequestException('Invalid content type');
-    const { data } = await this.supabase
+    const { data, error } = await this.supabase
       .getClient()
       .from(table)
       .select('id')
       .eq('id', contentId)
       .eq('user_id', userId)
       .maybeSingle();
+    // A real query failure must surface as 500, not be masked as "not owned".
+    if (error) {
+      throw new InternalServerErrorException('Failed to verify content ownership');
+    }
     if (!data) {
       throw new ForbiddenException(
         'Content not found or not owned by this account',
@@ -319,12 +340,16 @@ export class ContentService {
   private async assertRecipientsOwned(userId: string, recipientIds: string[]) {
     const unique = [...new Set(recipientIds)];
     if (unique.length === 0) return;
-    const { data } = await this.supabase
+    const { data, error } = await this.supabase
       .getClient()
       .from('recipients')
       .select('id')
       .eq('user_id', userId)
       .in('id', unique);
+    // Surface a real query failure as 500 instead of masking it as "not owned".
+    if (error) {
+      throw new InternalServerErrorException('Failed to verify recipients');
+    }
     if ((data?.length ?? 0) !== unique.length) {
       throw new ForbiddenException(
         'One or more recipients do not belong to this account',
