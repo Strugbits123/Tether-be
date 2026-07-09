@@ -7,6 +7,7 @@ import { SupabaseService } from '../shared/supabase/supabase.service.js';
 import { CreateReleaseManagerDto } from './dto/create-release-manager.dto.js';
 import { ActivityService } from '../activity/activity.service.js';
 import { PostHogService } from '../shared/posthog/posthog.service.js';
+import { AnalyticsService } from '../shared/posthog/analytics.service.js';
 
 @Injectable()
 export class ReleaseManagersService {
@@ -14,6 +15,7 @@ export class ReleaseManagersService {
     private readonly supabase: SupabaseService,
     private readonly activityService: ActivityService,
     private readonly posthog: PostHogService,
+    private readonly analytics: AnalyticsService,
   ) {}
 
   // POST /release-managers
@@ -67,9 +69,9 @@ export class ReleaseManagersService {
       );
     }
 
-    await this.markOnboardingStep(userId, 'add_release_manager').catch(
-      () => null,
-    );
+    await this.analytics
+      .markOnboardingStep(userId, 'add_release_manager')
+      .catch(() => null);
 
     this.activityService.log(userId, 'release_manager_designated', `Release Manager designated — ${name}`, {
       releaseManagerId: data.id,
@@ -77,7 +79,9 @@ export class ReleaseManagersService {
       email,
       relationship: dto.relationship,
     });
-    this.posthog.capture(userId, 'release_manager_designated', {
+    // Tracking-plan name is `release_manager_invited` (an invite is sent on
+    // designation). Extra `relationship` prop is harmless.
+    this.posthog.capture(userId, 'release_manager_invited', {
       relationship: dto.relationship,
     });
 
@@ -101,28 +105,5 @@ export class ReleaseManagersService {
     }
 
     return data; // null if none designated — caller decides how to render
-  }
-
-  // -------------------------------------------------------------------------
-  // Private helpers
-  // -------------------------------------------------------------------------
-  private async markOnboardingStep(userId: string, step: string) {
-    const { data: user } = await this.supabase
-      .getClient()
-      .from('users')
-      .select('onboarding')
-      .eq('id', userId)
-      .single();
-
-    if (!user) return;
-
-    const onboarding = (user.onboarding as Record<string, unknown>) ?? {};
-    onboarding[step] = true;
-
-    await this.supabase
-      .getClient()
-      .from('users')
-      .update({ onboarding, updated_at: new Date().toISOString() })
-      .eq('id', userId);
   }
 }

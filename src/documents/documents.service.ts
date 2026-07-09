@@ -9,6 +9,7 @@ import {
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
 import { ActivityService } from '../activity/activity.service.js';
 import { PostHogService } from '../shared/posthog/posthog.service.js';
+import { AnalyticsService } from '../shared/posthog/analytics.service.js';
 import { DocumentFileDescriptorDto } from './dto/request-upload-urls.dto.js';
 import { AssignmentDto } from './dto/assignment.dto.js';
 import {
@@ -66,6 +67,7 @@ export class DocumentsService {
     private readonly supabase: SupabaseService,
     private readonly activityService: ActivityService,
     private readonly posthog: PostHogService,
+    private readonly analytics: AnalyticsService,
   ) {}
 
   async getUploadUrls(userId: string, files: DocumentFileDescriptorDto[]) {
@@ -159,12 +161,17 @@ export class DocumentsService {
         () => null,
       );
 
-      // One document_secured per document so category/file_type/size_bucket
-      // are per-item (metadata only — never filename or content).
+      // One document_secured per document so category/file_type/size are
+      // per-item (metadata only — never filename or content). recipient_count
+      // reflects individually-named recipients on this batch's assignments.
       this.posthog.capture(userId, 'document_secured', {
         category,
         file_type: doc.fileType,
         size_bucket: sizeBucket(doc.fileSizeBytes),
+        file_size_kb: Math.round((doc.fileSizeBytes ?? 0) / 1024),
+        recipient_count: dto.assignments.filter(
+          (a) => a.scope === 'individual' && a.recipientId,
+        ).length,
       });
 
       createdDocuments.push(created);
@@ -177,7 +184,9 @@ export class DocumentsService {
       return mime.startsWith('audio/') || mime.startsWith('video/');
     });
     if (hasMedia) {
-      this.markOnboardingStep(userId, 'create_message').catch(() => null);
+      this.analytics
+        .markOnboardingStep(userId, 'create_message')
+        .catch(() => null);
     }
 
     return { count: createdDocuments.length, documents: createdDocuments };
@@ -439,7 +448,19 @@ export class DocumentsService {
       throw new InternalServerErrorException('Failed to delete document');
     }
 
+    this.posthog.capture(userId, 'document_deleted', {
+      age_days: this.ageDays(doc.created_at as string | null),
+    });
+
     return { message: 'Document deleted' };
+  }
+
+  // Whole days between a row's creation and now, for lifecycle analytics.
+  private ageDays(createdAt: string | null): number | null {
+    if (!createdAt) return null;
+    const created = new Date(createdAt).getTime();
+    if (Number.isNaN(created)) return null;
+    return Math.max(0, Math.floor((Date.now() - created) / 86_400_000));
   }
 
   private async requireOwnedDocument(userId: string, documentId: string) {
@@ -521,37 +542,6 @@ export class DocumentsService {
         'One or more recipients do not belong to this account',
       );
     }
-  }
-
-  private async markOnboardingStep(userId: string, step: string) {
-    const { data } = await this.supabase
-      .getClient()
-      .from('users')
-      .select('onboarding')
-      .eq('id', userId)
-      .single();
-
-    const onboarding = ((data?.onboarding ?? {}) as Record<string, unknown>);
-    if (onboarding[step]) return;
-
-    onboarding[step] = true;
-
-    const ALL_STEPS = [
-      'finish_account',
-      'add_release_manager',
-      'add_recipients',
-      'add_photos',
-      'create_message',
-    ];
-    if (ALL_STEPS.every((s) => onboarding[s] === true)) {
-      onboarding['completed_at'] = new Date().toISOString();
-    }
-
-    await this.supabase
-      .getClient()
-      .from('users')
-      .update({ onboarding, updated_at: new Date().toISOString() })
-      .eq('id', userId);
   }
 
   private async logUploadActivity(

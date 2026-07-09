@@ -8,6 +8,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
 import { PostHogService } from '../shared/posthog/posthog.service.js';
+import { AnalyticsService } from '../shared/posthog/analytics.service.js';
 import { SignupDto } from './dto/signup.dto.js';
 import { LoginDto } from './dto/login.dto.js';
 import { MagicLinkDto } from './dto/magic-link.dto.js';
@@ -20,6 +21,7 @@ export class AuthService {
     private readonly supabase: SupabaseService,
     private readonly config: ConfigService,
     private readonly posthog: PostHogService,
+    private readonly analytics: AnalyticsService,
   ) {}
 
   async signup(dto: SignupDto) {
@@ -80,7 +82,8 @@ export class AuthService {
     }
 
     if (data.user?.id) {
-      this.posthog.capture(data.user.id, 'user_signed_up', {
+      this.posthog.capture(data.user.id, 'account_created', {
+        signup_method: 'email',
         provider: 'email',
         acquisition_source: dto.acquisition_source ?? null,
         utm_source: dto.utm_source ?? null,
@@ -140,6 +143,10 @@ export class AuthService {
       .update({ last_login_at: new Date().toISOString() })
       .eq('id', data.user.id);
 
+    // Refresh PostHog person properties on the backend, where the full user
+    // record and related counts are available (the browser only sets email).
+    this.analytics.identifyUser(data.user.id).catch(() => null);
+
     return {
       access_token: data.session.access_token,
       refresh_token: data.session.refresh_token,
@@ -180,6 +187,23 @@ export class AuthService {
 
     if (error) {
       throw new InternalServerErrorException('Failed to send reset email');
+    }
+
+    // Best-effort analytics: resolve the account id by email so the event is
+    // attributed to the right person. Only fired when a matching user exists;
+    // this is server-side only and never changes the anti-enumeration response.
+    try {
+      const { data: user } = await this.supabase
+        .getClient()
+        .from('users')
+        .select('id')
+        .eq('email', dto.email.toLowerCase())
+        .maybeSingle();
+      if (user?.id) {
+        this.posthog.capture(user.id, 'password_reset_requested', {});
+      }
+    } catch {
+      // ignore — analytics must not affect the reset flow
     }
 
     // Always return success to prevent email enumeration

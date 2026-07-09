@@ -19,6 +19,7 @@ const validateEnv: ConfigModuleOptions['validate'] = (config: Record<string, unk
   return config;
 };
 import { ThrottlerModule } from '@nestjs/throttler';
+import { ScheduleModule } from '@nestjs/schedule';
 import { SharedModule } from './shared/shared.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { UsersModule } from './users/users.module.js';
@@ -33,6 +34,7 @@ import { ActivityModule } from './activity/activity.module.js';
 import { ContentModule } from './content/content.module.js';
 import { MemoirModule } from './memoir/memoir.module.js';
 import { FeedbackModule } from './feedback/feedback.module.js';
+import { AnalyticsModule } from './analytics/analytics.module.js';
 
 @Module({
   imports: [
@@ -49,6 +51,7 @@ import { FeedbackModule } from './feedback/feedback.module.js';
         },
       ],
     }),
+    ScheduleModule.forRoot(),
     SharedModule,
     AuthModule,
     UsersModule,
@@ -63,6 +66,7 @@ import { FeedbackModule } from './feedback/feedback.module.js';
     ContentModule,
     MemoirModule,
     FeedbackModule,
+    AnalyticsModule,
   ],
 })
 export class AppModule {}

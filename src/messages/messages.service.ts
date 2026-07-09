@@ -11,6 +11,7 @@ import Mux from '@mux/mux-node';
 import { DeepgramClient } from '@deepgram/sdk';
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
 import { PostHogService } from '../shared/posthog/posthog.service.js';
+import { AnalyticsService } from '../shared/posthog/analytics.service.js';
 import { AssignmentDto } from './dto/assignment.dto.js';
 import { CreateTextMessageDto } from './dto/create-text-message.dto.js';
 import { CreateVideoMessageDto } from './dto/create-video-message.dto.js';
@@ -57,6 +58,7 @@ export class MessagesService {
     private readonly config: ConfigService,
     private readonly activityService: ActivityService,
     private readonly posthog: PostHogService,
+    private readonly analytics: AnalyticsService,
   ) {}
 
   private getMuxClient(): Mux {
@@ -101,7 +103,9 @@ export class MessagesService {
     }
 
     await this.createAssignments(userId, message.id, dto.assignments);
-    this.markOnboardingCreateMessage(userId).catch(() => null);
+    this.analytics
+      .markOnboardingStep(userId, 'create_message')
+      .catch(() => null);
     this.activityService.log(
       userId,
       'message_created',
@@ -112,10 +116,9 @@ export class MessagesService {
         title: dto.title,
       },
     );
-    this.posthog.capture(userId, 'message_created', {
-      type: 'text',
+    // Text is fully saved on creation, so message_saved fires now.
+    await this.fireMessageSaved(userId, message.id, 'written', null, {
       char_count: stripHtmlTags(dto.body).length,
-      duration_sec: null,
     });
     return message;
   }
@@ -162,7 +165,9 @@ export class MessagesService {
     }
 
     await this.createAssignments(userId, message.id, dto.assignments);
-    this.markOnboardingCreateMessage(userId).catch(() => null);
+    this.analytics
+      .markOnboardingStep(userId, 'create_message')
+      .catch(() => null);
     this.activityService.log(
       userId,
       'message_created',
@@ -222,7 +227,9 @@ export class MessagesService {
     }
 
     await this.createAssignments(userId, message.id, dto.assignments);
-    this.markOnboardingCreateMessage(userId).catch(() => null);
+    this.analytics
+      .markOnboardingStep(userId, 'create_message')
+      .catch(() => null);
     this.activityService.log(
       userId,
       'message_created',
@@ -274,11 +281,13 @@ export class MessagesService {
       throw new InternalServerErrorException('Failed to confirm upload');
     }
 
-    this.posthog.capture(userId, 'message_created', {
-      type: 'audio',
-      duration_sec: updated.duration_seconds ?? null,
-      char_count: null,
-    });
+    // Audio is fully saved once the upload is confirmed and duration is known.
+    await this.fireMessageSaved(
+      userId,
+      messageId,
+      'audio',
+      updated.duration_seconds ?? null,
+    );
 
     this.transcribeAudio(messageId, message.storage_path).catch(() => null);
     return updated;
@@ -482,6 +491,11 @@ export class MessagesService {
       throw new InternalServerErrorException('Failed to delete message');
     }
 
+    this.posthog.capture(userId, 'message_deleted', {
+      message_type: this.analyticsType(message.type as string),
+      age_days: this.ageDays(message.created_at as string | null),
+    });
+
     return { message: 'Message deleted' };
   }
 
@@ -519,11 +533,13 @@ export class MessagesService {
       this.transcribeVideo(message.id, playbackId).catch(() => null);
     }
 
-    this.posthog.capture(message.user_id, 'message_created', {
-      type: 'video',
-      messageId: message.id,
-      duration_sec: Math.round((data.duration as number) ?? 0),
-    });
+    // Video is fully saved once Mux finishes processing the asset.
+    await this.fireMessageSaved(
+      message.user_id,
+      message.id,
+      'video',
+      Math.round((data.duration as number) ?? 0),
+    );
   }
 
   async handleMuxAssetErrored(event: Record<string, unknown>) {
@@ -770,34 +786,71 @@ export class MessagesService {
       .eq('id', messageId);
   }
 
-  private async markOnboardingCreateMessage(userId: string) {
-    const { data } = await this.supabase
+  // Maps the stored message type ('text'|'audio'|'video') to the tracking-plan
+  // vocabulary ('written'|'audio'|'video') so recorder and message events share
+  // one message_type value space.
+  private analyticsType(dbType: string): string {
+    return dbType === 'text' ? 'written' : dbType;
+  }
+
+  private ageDays(createdAt: string | null): number | null {
+    if (!createdAt) return null;
+    const created = new Date(createdAt).getTime();
+    if (Number.isNaN(created)) return null;
+    return Math.max(0, Math.floor((Date.now() - created) / 86_400_000));
+  }
+
+  // Fires message_saved (with recipient_count derived from the message's
+  // individual assignments) and, when it's the account's only message so far,
+  // first_message_recorded.
+  private async fireMessageSaved(
+    userId: string,
+    messageId: string,
+    messageType: string,
+    durationSeconds: number | null,
+    extra?: Record<string, any>,
+  ) {
+    const { count: recipientCount } = await this.supabase
+      .getClient()
+      .from('content_assignments')
+      .select('id', { count: 'exact', head: true })
+      .eq('content_type', 'message')
+      .eq('content_id', messageId)
+      .eq('assignment_scope', 'individual');
+
+    this.posthog.capture(userId, 'message_saved', {
+      message_type: messageType,
+      duration_seconds: durationSeconds,
+      recipient_count: recipientCount ?? 0,
+      // Scheduled delivery is not part of this backend subset yet.
+      has_scheduled_date: false,
+      ...extra,
+    });
+
+    await this.maybeFireFirstMessage(userId, messageType);
+  }
+
+  private async maybeFireFirstMessage(userId: string, messageType: string) {
+    const { count } = await this.supabase
+      .getClient()
+      .from('messages')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId);
+
+    if ((count ?? 0) !== 1) return;
+
+    const { data: user } = await this.supabase
       .getClient()
       .from('users')
-      .select('onboarding')
+      .select('created_at')
       .eq('id', userId)
       .single();
 
-    if (!data) return;
-
-    const onboarding = (data.onboarding ?? {}) as Record<string, unknown>;
-    onboarding['create_message'] = true;
-
-    const steps = [
-      'finish_account',
-      'add_release_manager',
-      'add_recipients',
-      'add_photos',
-      'create_message',
-    ];
-    if (steps.every((s) => onboarding[s] === true)) {
-      onboarding['completed_at'] = new Date().toISOString();
-    }
-
-    await this.supabase
-      .getClient()
-      .from('users')
-      .update({ onboarding, updated_at: new Date().toISOString() })
-      .eq('id', userId);
+    this.posthog.capture(userId, 'first_message_recorded', {
+      days_since_signup: this.ageDays(
+        (user?.created_at as string | null) ?? null,
+      ),
+      message_type: messageType,
+    });
   }
 }

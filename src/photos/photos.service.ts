@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
 import { PostHogService } from '../shared/posthog/posthog.service.js';
+import { AnalyticsService } from '../shared/posthog/analytics.service.js';
 import { FileDescriptorDto } from './dto/request-upload-urls.dto.js';
 import {
   AssignmentDto,
@@ -31,6 +32,7 @@ export class PhotosService {
     private readonly supabase: SupabaseService,
     private readonly activityService: ActivityService,
     private readonly posthog: PostHogService,
+    private readonly analytics: AnalyticsService,
   ) {}
 
   async getUploadUrls(userId: string, files: FileDescriptorDto[]) {
@@ -139,10 +141,20 @@ export class PhotosService {
       createdPhotos.push(createdPhoto);
     }
 
-    this.markOnboardingAddPhotos(userId).catch(() => null);
+    this.analytics.markOnboardingStep(userId, 'add_photos').catch(() => null);
+
+    const totalBytes = dto.photos.reduce(
+      (sum, p) => sum + (p.fileSizeBytes ?? 0),
+      0,
+    );
+    const recipientCount = effectiveAssignments.filter(
+      (a) => a.scope === 'individual' && a.recipientId,
+    ).length;
     this.posthog.capture(userId, 'photo_uploaded', {
       count: createdPhotos.length,
       folder: dto.folderId ?? 'uncategorized',
+      file_size_kb: Math.round(totalBytes / 1024),
+      recipient_count: recipientCount,
     });
 
     this.activityService.log(
@@ -635,36 +647,5 @@ export class PhotosService {
       .single();
     if (error || !folder) throw new NotFoundException('Folder not found');
     return folder;
-  }
-
-  private async markOnboardingAddPhotos(userId: string) {
-    const { data } = await this.supabase
-      .getClient()
-      .from('users')
-      .select('onboarding')
-      .eq('id', userId)
-      .single();
-
-    if (!data) return;
-
-    const onboarding = (data.onboarding ?? {}) as Record<string, unknown>;
-    onboarding['add_photos'] = true;
-
-    const steps = [
-      'finish_account',
-      'add_release_manager',
-      'add_recipients',
-      'add_photos',
-      'create_message',
-    ];
-    if (steps.every((s) => onboarding[s] === true)) {
-      onboarding['completed_at'] = new Date().toISOString();
-    }
-
-    await this.supabase
-      .getClient()
-      .from('users')
-      .update({ onboarding, updated_at: new Date().toISOString() })
-      .eq('id', userId);
   }
 }

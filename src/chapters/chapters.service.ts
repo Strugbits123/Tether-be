@@ -142,10 +142,11 @@ export class ChaptersService {
       })
       .catch(() => null);
 
-    this.posthog.capture(userId, 'chapter_created', {
+    this.posthog.capture(userId, 'memoir_chapter_created', {
       chapterId: created.id,
       theme: created.theme,
       type: created.type,
+      total_chapters_now: await this.countChapters(userId),
     });
 
     return created;
@@ -358,13 +359,17 @@ export class ChaptersService {
       fields_updated: fieldsUpdated,
     });
 
-    if (dto.status === 'complete') {
-      // A completed chapter is a saved memoir entry. `chapter` carries the
-      // theme (non-PII) — never the title.
-      this.posthog.capture(userId, 'memoir_entry_saved', {
+    if (dto.status === 'complete' && chapter.status !== 'complete') {
+      // Chapter marked complete. `theme` is non-PII; never send the title.
+      // time_spent_minutes is elapsed since the chapter was created (a proxy —
+      // per-edit active time is not tracked).
+      this.posthog.capture(userId, 'memoir_chapter_completed', {
         chapterId,
-        chapter: updated.theme ?? null,
+        theme: updated.theme ?? null,
         word_count: updated.word_count,
+        time_spent_minutes: this.minutesSince(
+          chapter.created_at as string | null,
+        ),
       });
     }
 
@@ -850,9 +855,11 @@ export class ChaptersService {
       })
       .catch(() => null);
 
-    this.posthog.capture(userId, 'voice_chapter_created', {
+    this.posthog.capture(userId, 'memoir_chapter_created', {
       chapterId: created.id,
+      type: 'voice',
       duration_seconds: dto.duration_seconds,
+      total_chapters_now: await this.countChapters(userId),
     });
 
     this.transcribeVoiceChapter(userId, created.id, dto.storage_path).catch(
@@ -1017,6 +1024,22 @@ export class ChaptersService {
 
     if (error || !data) throw new NotFoundException('Chapter not found');
     return data;
+  }
+
+  private async countChapters(userId: string): Promise<number> {
+    const { count } = await this.supabase
+      .getClient()
+      .from('chapters')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId);
+    return count ?? 0;
+  }
+
+  private minutesSince(iso: string | null): number | null {
+    if (!iso) return null;
+    const then = new Date(iso).getTime();
+    if (Number.isNaN(then)) return null;
+    return Math.max(0, Math.floor((Date.now() - then) / 60_000));
   }
 
   private hasContent(body: string | null | undefined): boolean {

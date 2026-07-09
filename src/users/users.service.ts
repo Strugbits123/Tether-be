@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { ImageMimeType } from './dto/avatar-upload.dto.js';
 import { ActivityService } from '../activity/activity.service.js';
+import { AnalyticsService } from '../shared/posthog/analytics.service.js';
 
 @Injectable()
 export class UsersService {
@@ -15,6 +16,7 @@ export class UsersService {
     private readonly supabase: SupabaseService,
     private readonly activityService: ActivityService,
     private readonly posthog: PostHogService,
+    private readonly analytics: AnalyticsService,
   ) {}
 
   async getMe(userId: string) {
@@ -59,7 +61,9 @@ export class UsersService {
         (currentUser?.onboarding as Record<string, unknown> | null)
           ?.finish_account === true;
 
-      await this.completeOnboardingStep(userId, 'finish_account');
+      // Centralized: sets finish_account, fires onboarding_completed +
+      // account_activated on the final step, and refreshes person properties.
+      await this.analytics.markOnboardingStep(userId, 'finish_account');
 
       if (!wasCompleted) {
         this.activityService.log(userId, 'profile_completed', 'Profile completed', {});
@@ -68,53 +72,11 @@ export class UsersService {
           age_band: dto.age_group ?? null,
           gender: dto.gender ?? null,
         });
-        // Person properties for segmentation only — no names/PII.
-        this.posthog.identify(userId, {
-          state: dto.state ?? null,
-          age_band: dto.age_group ?? null,
-          gender: dto.gender ?? null,
-          plan_tier: 'free',
-        });
       }
     }
 
     // Fetch updated row separately
     return this.getMe(userId);
-  }
-
-  async completeOnboardingStep(userId: string, step: string) {
-    const { data: user } = await this.supabase
-      .getClient()
-      .from('users')
-      .select('onboarding')
-      .eq('id', userId)
-      .single();
-
-    if (!user) return;
-
-    const onboarding = user.onboarding as Record<
-      string,
-      boolean | string | null
-    >;
-    onboarding[step] = true;
-
-    const steps = [
-      'finish_account',
-      'add_release_manager',
-      'add_recipients',
-      'add_photos',
-      'create_message',
-    ];
-    const allComplete = steps.every((s) => onboarding[s] === true);
-    if (allComplete) {
-      onboarding['completed_at'] = new Date().toISOString();
-    }
-
-    await this.supabase
-      .getClient()
-      .from('users')
-      .update({ onboarding, updated_at: new Date().toISOString() })
-      .eq('id', userId);
   }
 
   async completeOnboarding(userId: string) {
