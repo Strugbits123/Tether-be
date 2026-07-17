@@ -160,12 +160,25 @@ export class AnalyticsCronService {
           .update({ attempts: (row.attempts ?? 0) + 1 })
           .eq('id', row.id);
 
-        this.posthog.capture(
-          row.distinct_id,
-          row.event,
-          (row.properties ?? {}) as Record<string, unknown>,
-          row.id, // idempotency key — PostHog dedupes by uuid
-        );
+        try {
+          // Awaited send — resolves only after PostHog receives the event, so we
+          // never mark a row published before it's actually delivered. The row
+          // id is the idempotency key, so a retry after a partial failure is
+          // de-duplicated.
+          await this.posthog.captureImmediate(
+            row.distinct_id,
+            row.event,
+            (row.properties ?? {}) as Record<string, unknown>,
+            row.id,
+          );
+        } catch (sendErr) {
+          this.logger.warn(
+            `analytics_outbox publish failed for ${row.id}: ${
+              sendErr instanceof Error ? sendErr.message : sendErr
+            }`,
+          );
+          continue; // leave unpublished for the next run to retry
+        }
 
         await this.supabase
           .getClient()

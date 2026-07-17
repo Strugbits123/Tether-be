@@ -53,6 +53,32 @@ export class PostHogService implements OnModuleDestroy {
     }
   }
 
+  /**
+   * Awaited capture — resolves only after the event is actually sent to PostHog
+   * (not just queued). Used by the outbox drainer so an outbox row is marked
+   * published only once delivery succeeds. Throws on send failure so the caller
+   * leaves the row unpublished for retry.
+   */
+  async captureImmediate(
+    distinctId: string,
+    event: string,
+    properties?: Record<string, any>,
+    uuid?: string,
+  ): Promise<void> {
+    if (!this.client) return;
+    await this.client.captureImmediate({
+      distinctId,
+      event,
+      properties: {
+        ...properties,
+        user_id: distinctId,
+        environment: this.environment,
+        source: 'server',
+      },
+      ...(uuid ? { uuid } : {}),
+    });
+  }
+
   identify(distinctId: string, properties?: Record<string, any>) {
     if (!this.client) return;
 

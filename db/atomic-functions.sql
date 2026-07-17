@@ -408,6 +408,7 @@ begin
   update public.memoirs m
      set abandoned_at = now()
    where m.id = p_memoir_id
+     and m.user_id = p_user_id
      and m.abandoned_at is null
      and exists (
        select 1 from public.chapters c where c.user_id = p_user_id
