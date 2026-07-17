@@ -48,17 +48,29 @@ export class AnalyticsCronService {
         if (typeof onboarding['completed_at'] === 'string') continue; // completed
         if (typeof onboarding['abandoned_at'] === 'string') continue; // already fired
 
-        this.posthog.capture(user.id, 'onboarding_abandoned', {
-          last_completed_step: this.lastCompletedStep(onboarding),
-          days_since_signup: this.daysSince(user.created_at as string | null),
-        });
-
-        onboarding['abandoned_at'] = new Date().toISOString();
-        await this.supabase
+        // Atomically claim the marker: sets only the abandoned_at JSON path and
+        // only if the user still hasn't completed or been marked (guards against
+        // a step completing between the read above and this write). Fire the
+        // event only when the claim actually took a row, so it can't double-fire.
+        const { data: claimed, error } = await this.supabase
           .getClient()
-          .from('users')
-          .update({ onboarding, updated_at: new Date().toISOString() })
-          .eq('id', user.id);
+          .rpc('claim_onboarding_abandoned', { p_user_id: user.id });
+
+        if (error) {
+          this.logger.warn(
+            `claim_onboarding_abandoned failed for ${user.id}: ${error.message}`,
+          );
+          continue;
+        }
+        const row = (claimed as { created_at: string; onboarding: OnboardingState }[] | null)?.[0];
+        if (!row) continue; // someone else completed/claimed it first
+
+        this.posthog.capture(user.id, 'onboarding_abandoned', {
+          last_completed_step: this.lastCompletedStep(
+            (row.onboarding ?? onboarding) as OnboardingState,
+          ),
+          days_since_signup: this.daysSince(row.created_at ?? null),
+        });
       }
     } catch (err) {
       this.logger.error(
@@ -98,6 +110,25 @@ export class AnalyticsCronService {
 
         const completed = rows.filter((c) => c.status === 'complete').length;
 
+        // Claim the marker first, conditional on it still being null, and check
+        // the result — only fire the event once the marker is durably set, so a
+        // failed write can't leave the event firing every run.
+        const { data: claimed, error: claimError } = await this.supabase
+          .getClient()
+          .from('memoirs')
+          .update({ abandoned_at: new Date().toISOString() })
+          .eq('id', memoir.id)
+          .is('abandoned_at', null)
+          .select('id');
+
+        if (claimError) {
+          this.logger.warn(
+            `memoir_abandoned claim failed for ${memoir.id}: ${claimError.message}`,
+          );
+          continue;
+        }
+        if (!claimed || claimed.length === 0) continue; // already claimed
+
         this.posthog.capture(memoir.user_id, 'memoir_abandoned', {
           chapters_completed: completed,
           days_since_last_edit: Math.max(
@@ -105,12 +136,6 @@ export class AnalyticsCronService {
             Math.floor((Date.now() - lastEdit) / DAY_MS),
           ),
         });
-
-        await this.supabase
-          .getClient()
-          .from('memoirs')
-          .update({ abandoned_at: new Date().toISOString() })
-          .eq('id', memoir.id);
       }
     } catch (err) {
       this.logger.error(

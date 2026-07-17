@@ -11,7 +11,6 @@ import { ActivityService } from '../activity/activity.service.js';
 import { PostHogService } from '../shared/posthog/posthog.service.js';
 import { AnalyticsService } from '../shared/posthog/analytics.service.js';
 import { DocumentFileDescriptorDto } from './dto/request-upload-urls.dto.js';
-import { AssignmentDto } from './dto/assignment.dto.js';
 import {
   CreateDocumentsBatchDto,
   DocumentItemDto,
@@ -126,55 +125,82 @@ export class DocumentsService {
   }
 
   async createBatch(userId: string, dto: CreateDocumentsBatchDto) {
-    const createdDocuments: Record<string, unknown>[] = [];
+    const effective =
+      dto.assignments.length > 0 ? dto.assignments : [{ scope: 'assign_later' }];
+
+    // Authorize recipients BEFORE any write, so a cross-tenant assignment can't
+    // create orphaned document rows before returning 403.
+    await this.assertRecipientsOwned(
+      userId,
+      effective
+        .filter((a) => a.scope === 'individual' && a.recipientId)
+        .map((a) => a.recipientId as string),
+    );
+
+    const documentsPayload = dto.documents.map((doc) => ({
+      title: doc.title ?? doc.originalFilename.replace(/\.[^.]+$/, ''),
+      category: doc.category ?? 'other',
+      original_filename: doc.originalFilename,
+      storage_path: doc.storagePath,
+      file_type: doc.fileType,
+      file_size_bytes: doc.fileSizeBytes,
+      mime_type: doc.mimeType ?? null,
+    }));
+    const assignmentRows = effective.map((a) => ({
+      assignment_scope: a.scope,
+      group_value: a.scope === 'group' ? (a.groupValue ?? null) : null,
+      recipient_id: a.scope === 'individual' ? (a.recipientId ?? null) : null,
+    }));
+
+    // Insert all documents + their assignments in a single transaction so a
+    // partial failure can't leave orphaned/partly-committed rows.
+    const { data, error } = await this.supabase
+      .getClient()
+      .rpc('create_documents_with_assignments', {
+        p_user_id: userId,
+        p_documents: documentsPayload,
+        p_assignments: assignmentRows,
+        p_note: dto.note ?? null,
+      });
+
+    if (error || !data) {
+      throw new InternalServerErrorException('Failed to save documents');
+    }
+
+    const createdDocuments = data as Record<string, any>[];
+    const byPath = new Map(
+      createdDocuments.map((d) => [d.storage_path as string, d]),
+    );
 
     for (const doc of dto.documents) {
-      const title = doc.title ?? doc.originalFilename.replace(/\.[^.]+$/, '');
-      const category = doc.category ?? 'other';
+      const created = byPath.get(doc.storagePath);
+      if (!created) continue;
+      this.logUploadActivity(
+        userId,
+        created.id as string,
+        (created.title as string) ?? doc.originalFilename,
+        (created.category as string) ?? 'other',
+        doc,
+      ).catch(() => null);
 
-      const { data: created, error } = await this.supabase
-        .getClient()
-        .from('documents')
-        .insert({
-          user_id: userId,
-          title,
-          category,
-          note: dto.note ?? null,
-          original_filename: doc.originalFilename,
-          storage_path: doc.storagePath,
-          file_type: doc.fileType,
-          file_size_bytes: doc.fileSizeBytes,
-          mime_type: doc.mimeType ?? null,
-        })
-        .select()
-        .single();
-
-      if (error || !created) {
-        throw new InternalServerErrorException(
-          'Failed to save document record',
-        );
-      }
-
-      await this.createAssignments(userId, created.id, dto.assignments);
-
-      this.logUploadActivity(userId, created.id, title, category, doc).catch(
-        () => null,
-      );
-
-      // One document_secured per document so category/file_type/size are
-      // per-item (metadata only — never filename or content). recipient_count
-      // reflects individually-named recipients on this batch's assignments.
+      // Metadata only — never filename or content.
       this.posthog.capture(userId, 'document_secured', {
-        category,
+        category: created.category ?? 'other',
         file_type: doc.fileType,
         size_bucket: sizeBucket(doc.fileSizeBytes),
         file_size_kb: Math.round((doc.fileSizeBytes ?? 0) / 1024),
-        recipient_count: dto.assignments.filter(
+        recipient_count: effective.filter(
           (a) => a.scope === 'individual' && a.recipientId,
         ).length,
       });
+    }
 
-      createdDocuments.push(created);
+    // Fire document_assigned once for the batch on an explicit assignment.
+    if (dto.assignments.some((a) => a.scope !== 'assign_later')) {
+      this.posthog.capture(userId, 'document_assigned', {
+        recipient_count: dto.assignments.filter((a) => a.scope === 'individual')
+          .length,
+      });
     }
 
     // Mark create_message onboarding step when audio/video is uploaded,
@@ -288,12 +314,17 @@ export class DocumentsService {
     if (docs.length === 0) return [];
 
     const docIds = docs.map((d) => d.id);
-    const { data: assignments } = await this.supabase
+    const { data: assignments, error: assignmentsError } = await this.supabase
       .getClient()
       .from('content_assignments')
       .select('content_id, assignment_scope, group_value, recipient_id')
       .eq('content_type', 'document')
       .in('content_id', docIds);
+
+    // Surface a failure instead of silently reporting assignmentCount: 0.
+    if (assignmentsError) {
+      throw new InternalServerErrorException('Failed to fetch assignments');
+    }
 
     const assignmentMap = new Map<string, number>();
     for (const a of assignments ?? []) {
@@ -303,13 +334,18 @@ export class DocumentsService {
       );
     }
 
-    const { data: urlResults } = await this.supabase
+    const { data: urlResults, error: urlError } = await this.supabase
       .getClient()
       .storage.from('documents')
       .createSignedUrls(
         docs.map((d) => d.storage_path),
         3600,
       );
+
+    // Surface a signing failure rather than returning null URLs as valid state.
+    if (urlError) {
+      throw new InternalServerErrorException('Failed to generate document URLs');
+    }
 
     const urlMap = new Map(
       (urlResults ?? []).map((r) => [r.path, r.signedUrl]),
@@ -325,21 +361,29 @@ export class DocumentsService {
   async getDocument(userId: string, documentId: string) {
     const doc = await this.requireOwnedDocument(userId, documentId);
 
-    const { data: urlData } = await this.supabase
+    const { data: urlData, error: urlError } = await this.supabase
       .getClient()
       .storage.from('documents')
       .createSignedUrl(doc.storage_path, 3600);
 
-    const { data: assignments } = await this.supabase
+    if (urlError || !urlData) {
+      throw new InternalServerErrorException('Failed to generate document URL');
+    }
+
+    const { data: assignments, error: assignmentsError } = await this.supabase
       .getClient()
       .from('content_assignments')
       .select('assignment_scope, group_value, recipient_id')
       .eq('content_type', 'document')
       .eq('content_id', documentId);
 
+    if (assignmentsError) {
+      throw new InternalServerErrorException('Failed to fetch assignments');
+    }
+
     return {
       ...doc,
-      signedUrl: urlData?.signedUrl ?? null,
+      signedUrl: urlData.signedUrl,
       assignments: assignments ?? [],
     };
   }
@@ -350,6 +394,27 @@ export class DocumentsService {
     dto: UpdateDocumentDto,
   ) {
     const doc = await this.requireOwnedDocument(userId, documentId);
+
+    // Authorize recipients BEFORE any mutation, so a cross-tenant recipient
+    // can't change the title/note/category and then fail with 403.
+    let assignmentRows:
+      | { assignment_scope: string; group_value: string | null; recipient_id: string | null }[]
+      | null = null;
+    if (dto.assignments !== undefined) {
+      const effective =
+        dto.assignments.length > 0 ? dto.assignments : [{ scope: 'assign_later' }];
+      await this.assertRecipientsOwned(
+        userId,
+        effective
+          .filter((a) => a.scope === 'individual' && a.recipientId)
+          .map((a) => a.recipientId as string),
+      );
+      assignmentRows = effective.map((a) => ({
+        assignment_scope: a.scope,
+        group_value: a.scope === 'group' ? (a.groupValue ?? null) : null,
+        recipient_id: a.scope === 'individual' ? (a.recipientId ?? null) : null,
+      }));
+    }
 
     const updates: Record<string, unknown> = {
       updated_at: new Date().toISOString(),
@@ -370,25 +435,20 @@ export class DocumentsService {
       throw new InternalServerErrorException('Failed to update document');
     }
 
-    if (dto.assignments !== undefined) {
-      // Authorize recipients BEFORE clearing the existing assignments so a
-      // cross-tenant recipientId can't wipe the document's assignments and
-      // leave it unassigned when the update aborts.
-      await this.assertRecipientsOwned(
-        userId,
-        dto.assignments
-          .filter((a) => a.scope === 'individual' && a.recipientId)
-          .map((a) => a.recipientId as string),
-      );
-
-      await this.supabase
+    if (assignmentRows !== null) {
+      // Transactional replace: delete + insert in one RPC so a failed insert
+      // can't permanently leave the document unassigned.
+      const { error: replaceError } = await this.supabase
         .getClient()
-        .from('content_assignments')
-        .delete()
-        .eq('content_type', 'document')
-        .eq('content_id', documentId);
-
-      await this.createAssignments(userId, documentId, dto.assignments);
+        .rpc('replace_content_assignments', {
+          p_user_id: userId,
+          p_content_type: 'document',
+          p_content_id: documentId,
+          p_rows: assignmentRows,
+        });
+      if (replaceError) {
+        throw new InternalServerErrorException('Failed to update assignments');
+      }
     }
 
     if (dto.category !== undefined && dto.category !== doc.category) {
@@ -474,54 +534,6 @@ export class DocumentsService {
 
     if (error || !data) throw new NotFoundException('Document not found');
     return data;
-  }
-
-  private async createAssignments(
-    userId: string,
-    documentId: string,
-    assignments: AssignmentDto[],
-  ) {
-    const effective =
-      assignments.length > 0 ? assignments : [{ scope: 'assign_later' }];
-
-    // Cross-tenant guard: individual recipients must belong to this user.
-    await this.assertRecipientsOwned(
-      userId,
-      effective
-        .filter((a) => a.scope === 'individual' && a.recipientId)
-        .map((a) => a.recipientId as string),
-    );
-
-    // Single batched insert instead of one round trip per assignment.
-    const rows = effective.map((a) => ({
-      user_id: userId,
-      content_type: 'document',
-      content_id: documentId,
-      assignment_scope: a.scope,
-      group_value: a.scope === 'group' ? (a.groupValue ?? null) : null,
-      recipient_id: a.scope === 'individual' ? (a.recipientId ?? null) : null,
-    }));
-
-    const { error } = await this.supabase
-      .getClient()
-      .from('content_assignments')
-      .insert(rows);
-
-    if (error) {
-      throw new InternalServerErrorException('Failed to create assignment');
-    }
-
-    // Fire document_assigned only on an explicit assignment (not the implicit
-    // 'assign_later' default). recipient_count = individually-named recipients.
-    const hasExplicitAssignment = assignments.some(
-      (a) => a.scope !== 'assign_later',
-    );
-    if (hasExplicitAssignment) {
-      this.posthog.capture(userId, 'document_assigned', {
-        recipient_count: assignments.filter((a) => a.scope === 'individual')
-          .length,
-      });
-    }
   }
 
   private async assertRecipientsOwned(userId: string, recipientIds: string[]) {

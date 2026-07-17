@@ -15,6 +15,23 @@ function sanitizeFileName(name: string): string {
   return cleaned.slice(0, 200) || 'file';
 }
 
+// HTML-escape any user-controlled value before interpolating it into the
+// support email so a submitter can't inject markup into the mailbox.
+function escapeHtml(value: string | null | undefined): string {
+  return (value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// Collapse CR/LF so user values can't inject additional email headers via the
+// subject line.
+function singleLine(value: string): string {
+  return value.replace(/[\r\n]+/g, ' ').trim();
+}
+
 @Injectable()
 export class FeedbackService {
   private readonly logger = new Logger(FeedbackService.name);
@@ -178,7 +195,7 @@ export class FeedbackService {
         .storage.from('feedback-screenshots')
         .createSignedUrl(dto.screenshot_path, 3600);
       if (urlData?.signedUrl) {
-        screenshotHtml = `<p><strong>Screenshot:</strong> <a href="${urlData.signedUrl}">View screenshot</a></p>`;
+        screenshotHtml = `<p><strong>Screenshot:</strong> <a href="${escapeHtml(urlData.signedUrl)}">View screenshot</a></p>`;
       }
     } else if (dto.screenshot_path) {
       this.logger.warn(
@@ -199,13 +216,16 @@ export class FeedbackService {
   }
 
   private buildSubject(dto: SubmitFeedbackDto, userName: string): string {
+    const name = singleLine(userName);
     if (dto.type === 'bug_report') {
-      return `🐛 Bug Report from ${userName}${dto.location ? ` — ${dto.location}` : ''}`;
+      const loc = dto.location ? ` — ${singleLine(dto.location)}` : '';
+      return `🐛 Bug Report from ${name}${loc}`;
     }
     if (dto.type === 'feature_request') {
-      return `💡 Feature Request from ${userName}`;
+      return `💡 Feature Request from ${name}`;
     }
-    return `💬 Feedback${dto.feedback_type ? ` (${dto.feedback_type})` : ''} from ${userName}`;
+    const ft = dto.feedback_type ? ` (${singleLine(dto.feedback_type)})` : '';
+    return `💬 Feedback${ft} from ${name}`;
   }
 
   private buildEmailHtml(
@@ -215,23 +235,25 @@ export class FeedbackService {
     feedbackId: string,
     screenshotHtml: string,
   ): string {
+    // Every dynamic value is HTML-escaped. dto.type is enum-validated but
+    // escaped anyway for defense in depth.
     const rows: string[] = [
-      `<p><strong>User:</strong> ${userName} &lt;${userEmail}&gt;</p>`,
-      `<p><strong>Type:</strong> ${dto.type.replace(/_/g, ' ')}</p>`,
-      `<p><strong>Feedback ID:</strong> ${feedbackId}</p>`,
+      `<p><strong>User:</strong> ${escapeHtml(userName)} &lt;${escapeHtml(userEmail)}&gt;</p>`,
+      `<p><strong>Type:</strong> ${escapeHtml(dto.type.replace(/_/g, ' '))}</p>`,
+      `<p><strong>Feedback ID:</strong> ${escapeHtml(feedbackId)}</p>`,
       `<p><strong>Submitted:</strong> ${new Date().toUTCString()}</p>`,
       '<hr>',
     ];
 
     if (dto.type === 'bug_report') {
-      if (dto.location) rows.push(`<p><strong>Location:</strong> ${dto.location}</p>`);
-      if (dto.description) rows.push(`<p><strong>Description:</strong></p><p>${dto.description}</p>`);
+      if (dto.location) rows.push(`<p><strong>Location:</strong> ${escapeHtml(dto.location)}</p>`);
+      if (dto.description) rows.push(`<p><strong>Description:</strong></p><p>${escapeHtml(dto.description)}</p>`);
     } else if (dto.type === 'feature_request') {
-      if (dto.feature_description) rows.push(`<p><strong>Feature:</strong></p><p>${dto.feature_description}</p>`);
-      if (dto.feature_benefit) rows.push(`<p><strong>Benefit:</strong></p><p>${dto.feature_benefit}</p>`);
+      if (dto.feature_description) rows.push(`<p><strong>Feature:</strong></p><p>${escapeHtml(dto.feature_description)}</p>`);
+      if (dto.feature_benefit) rows.push(`<p><strong>Benefit:</strong></p><p>${escapeHtml(dto.feature_benefit)}</p>`);
     } else {
-      if (dto.feedback_type) rows.push(`<p><strong>Feedback type:</strong> ${dto.feedback_type}</p>`);
-      if (dto.description) rows.push(`<p><strong>Description:</strong></p><p>${dto.description}</p>`);
+      if (dto.feedback_type) rows.push(`<p><strong>Feedback type:</strong> ${escapeHtml(dto.feedback_type)}</p>`);
+      if (dto.description) rows.push(`<p><strong>Description:</strong></p><p>${escapeHtml(dto.description)}</p>`);
     }
 
     if (screenshotHtml) rows.push(screenshotHtml);
