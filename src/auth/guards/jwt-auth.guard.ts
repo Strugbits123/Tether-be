@@ -4,7 +4,7 @@ import {
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
-import { SupabaseService } from '../../shared/supabase/supabase.service';
+import { SupabaseService } from '../../shared/supabase/supabase.service.js';
 
 @Injectable()
 export class JwtAuthGuard implements CanActivate {

@@ -8,6 +8,7 @@ import {
   IsNotEmpty,
   IsString,
   Max,
+  MaxLength,
   Min,
   ValidateNested,
 } from 'class-validator';
@@ -15,6 +16,7 @@ import {
 export class FileDescriptorDto {
   @IsString()
   @IsNotEmpty()
+  @MaxLength(255)
   fileName: string;
 
   @IsIn(['image/jpeg', 'image/png', 'image/webp', 'image/heic'])

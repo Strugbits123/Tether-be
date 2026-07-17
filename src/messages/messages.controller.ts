@@ -29,18 +29,12 @@ export class MessagesController {
   }
 
   @Post('video/upload-url')
-  createVideoUploadUrl(
-    @Request() req: any,
-    @Body() dto: CreateVideoMessageDto,
-  ) {
+  createVideoUploadUrl(@Request() req: any, @Body() dto: CreateVideoMessageDto) {
     return this.messagesService.createVideoUploadUrl(req.user.id, dto);
   }
 
   @Post('audio/upload-url')
-  createAudioUploadUrl(
-    @Request() req: any,
-    @Body() dto: CreateAudioMessageDto,
-  ) {
+  createAudioUploadUrl(@Request() req: any, @Body() dto: CreateAudioMessageDto) {
     return this.messagesService.createAudioUploadUrl(req.user.id, dto);
   }
 

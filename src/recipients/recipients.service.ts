@@ -6,12 +6,16 @@ import {
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
 import { CreateRecipientDto } from './dto/create-recipient.dto.js';
 import { ActivityService } from '../activity/activity.service.js';
+import { PostHogService } from '../shared/posthog/posthog.service.js';
+import { AnalyticsService } from '../shared/posthog/analytics.service.js';
 
 @Injectable()
 export class RecipientsService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly activityService: ActivityService,
+    private readonly posthog: PostHogService,
+    private readonly analytics: AnalyticsService,
   ) {}
 
   // POST /recipients
@@ -45,16 +49,24 @@ export class RecipientsService {
         note: dto.note ?? null,
       })
       .select(
-        'id, name, email, phone, relationship, note, invitation_status, access_code, created_at',
+        'id, name, email, phone, relationship, note, invitation_status, created_at',
       )
       .single();
 
     if (error) {
-      console.error('Error inserting recipient:', error);
       throw new InternalServerErrorException('Failed to add recipient.');
     }
 
-    await this.markOnboardingStep(userId, 'add_recipients').catch(() => null);
+    await this.analytics
+      .markOnboardingStep(userId, 'add_recipients')
+      .catch(() => null);
+
+    // Total recipients on the account after this insert.
+    const { count: totalRecipients } = await this.supabase
+      .getClient()
+      .from('recipients')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId);
 
     this.activityService.log(
       userId,
@@ -67,6 +79,13 @@ export class RecipientsService {
         relationship: dto.relationship,
       },
     );
+    this.posthog.capture(userId, 'recipient_added', {
+      relationship: dto.relationship,
+      // No date-of-birth is collected for recipients, so minor status is
+      // unknown rather than false.
+      is_minor: null,
+      total_recipients_now: totalRecipients ?? null,
+    });
 
     return data;
   }
@@ -89,26 +108,22 @@ export class RecipientsService {
     return data ?? [];
   }
 
-  // -------------------------------------------------------------------------
-  // Private helpers
-  // -------------------------------------------------------------------------
-  private async markOnboardingStep(userId: string, step: string) {
-    const { data: user } = await this.supabase
+  // Used by other modules (e.g. chapters) to resolve recipient names for
+  // individual assignments without duplicating the query pattern.
+  async findByIds(userId: string, ids: string[]) {
+    if (ids.length === 0) return [];
+
+    const { data, error } = await this.supabase
       .getClient()
-      .from('users')
-      .select('onboarding')
-      .eq('id', userId)
-      .single();
+      .from('recipients')
+      .select('id, name, relationship')
+      .eq('user_id', userId)
+      .in('id', ids);
 
-    if (!user) return;
+    if (error) {
+      throw new InternalServerErrorException('Failed to fetch recipients.');
+    }
 
-    const onboarding = (user.onboarding as Record<string, unknown>) ?? {};
-    onboarding[step] = true;
-
-    await this.supabase
-      .getClient()
-      .from('users')
-      .update({ onboarding, updated_at: new Date().toISOString() })
-      .eq('id', userId);
+    return data ?? [];
   }
 }

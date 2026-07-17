@@ -6,5 +6,6 @@ import { MessagesService } from './messages.service.js';
 @Module({
   controllers: [MessagesController, MessagesWebhookController],
   providers: [MessagesService],
+  exports: [MessagesService],
 })
 export class MessagesModule {}
