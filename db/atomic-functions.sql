@@ -273,7 +273,20 @@ declare
   v_was_complete boolean;
   v_now_complete boolean;
   v_just boolean := false;
+  v_days int;
+  v_total_recipients int;
+  v_total_messages int;
 begin
+  -- Only the five real step flags may be set — never a reserved field like
+  -- completed_at, which would falsely mark onboarding complete and block the
+  -- real transition (and its analytics events).
+  if p_step not in (
+    'finish_account', 'add_release_manager', 'add_recipients',
+    'add_photos', 'create_message'
+  ) then
+    raise exception 'invalid onboarding step: %', p_step;
+  end if;
+
   select u.onboarding, u.created_at
     into v_onb, v_created
     from public.users u
@@ -304,6 +317,27 @@ begin
      set onboarding = v_onb, updated_at = now()
    where id = p_user_id;
 
+  -- Durable delivery: enqueue the completion + activation events in the SAME
+  -- transaction as the state change, so a crash after commit can't lose them.
+  -- The publisher (drain_analytics_outbox path) sends them with the row id as
+  -- an idempotency key.
+  if v_just then
+    v_days := greatest(0, extract(day from (now() - v_created))::int);
+    select count(*) into v_total_recipients from public.recipients where user_id = p_user_id;
+    select count(*) into v_total_messages from public.messages where user_id = p_user_id;
+
+    insert into public.analytics_outbox (distinct_id, event, properties)
+    values
+      (p_user_id::text, 'onboarding_completed', jsonb_build_object(
+        'days_to_complete', v_days,
+        'total_messages', v_total_messages,
+        'total_recipients', v_total_recipients
+      )),
+      (p_user_id::text, 'account_activated', jsonb_build_object(
+        'days_to_activate', v_days
+      ));
+  end if;
+
   return query select v_just, v_created, v_onb;
 end;
 $$;
@@ -333,5 +367,67 @@ begin
   end if;
 
   return v_count;
+end;
+$$;
+
+-- Transactional outbox for lifecycle analytics events that must not be lost on
+-- a crash between the DB commit and the PostHog publish. Rows are enqueued in
+-- the same transaction as the state change (see complete_onboarding_step) and
+-- drained by the backend, which uses the row id as the PostHog event uuid so a
+-- re-send is de-duplicated.
+create table if not exists public.analytics_outbox (
+  id uuid primary key default gen_random_uuid(),
+  distinct_id text not null,
+  event text not null,
+  properties jsonb not null default '{}'::jsonb,
+  attempts int not null default 0,
+  published_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists analytics_outbox_unpublished_idx
+  on public.analytics_outbox (created_at)
+  where published_at is null;
+
+-- Atomically claim the memoir_abandoned marker, revalidating inactivity in the
+-- same statement: sets abandoned_at only when the memoir is still unmarked, has
+-- at least one chapter, and NO chapter has been edited on/after the cutoff — so
+-- a chapter edited between the caller's read and this claim can't produce a
+-- false marker/event. Returns the analytics props only when it actually claimed.
+create or replace function claim_memoir_abandoned(
+  p_memoir_id uuid,
+  p_user_id uuid,
+  p_cutoff timestamptz
+) returns table (chapters_completed int, days_since_last_edit int)
+language plpgsql
+as $$
+declare
+  v_last timestamptz;
+  v_completed int;
+begin
+  update public.memoirs m
+     set abandoned_at = now()
+   where m.id = p_memoir_id
+     and m.abandoned_at is null
+     and exists (
+       select 1 from public.chapters c where c.user_id = p_user_id
+     )
+     and not exists (
+       select 1 from public.chapters c
+        where c.user_id = p_user_id and c.updated_at >= p_cutoff
+     );
+
+  if not found then
+    return; -- already claimed, no chapters, or still active
+  end if;
+
+  select count(*) filter (where status = 'complete'), max(updated_at)
+    into v_completed, v_last
+    from public.chapters
+   where user_id = p_user_id;
+
+  return query
+    select v_completed,
+           greatest(0, extract(day from (now() - v_last))::int);
 end;
 $$;

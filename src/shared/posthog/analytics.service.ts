@@ -70,41 +70,16 @@ export class AnalyticsService {
       return;
     }
 
-    const result = (data as
-      | { just_completed: boolean; created_at: string | null }[]
-      | null)?.[0];
+    const result = (data as { just_completed: boolean }[] | null)?.[0];
     if (!result) return; // no such user
 
-    if (result.just_completed) {
-      await this.fireOnboardingComplete(userId, result.created_at ?? null);
-    }
+    // onboarding_completed / account_activated are enqueued in the outbox by
+    // the RPC (same transaction) and published durably by the outbox drainer,
+    // so they are NOT fired here.
 
     // Keep person properties fresh so activation_status / has_* flags reflect
     // the new step.
     await this.identifyUser(userId);
-  }
-
-  private async fireOnboardingComplete(
-    userId: string,
-    createdAt: string | null,
-  ): Promise<void> {
-    const [totalRecipients, totalMessages] = await Promise.all([
-      this.countRows('recipients', userId),
-      this.countRows('messages', userId),
-    ]);
-    const daysSince = this.daysSince(createdAt);
-
-    this.posthog.capture(userId, 'onboarding_completed', {
-      days_to_complete: daysSince,
-      total_messages: totalMessages,
-      total_recipients: totalRecipients,
-    });
-
-    // Activation == all five onboarding steps done. Same trigger, separate
-    // event so the activation funnel can terminate on it.
-    this.posthog.capture(userId, 'account_activated', {
-      days_to_activate: daysSince,
-    });
   }
 
   private async buildPersonProperties(
@@ -166,12 +141,5 @@ export class AnalyticsService {
       .not('status', 'in', '("revoked","declined")')
       .maybeSingle();
     return !!data;
-  }
-
-  private daysSince(iso: string | null): number | null {
-    if (!iso) return null;
-    const then = new Date(iso).getTime();
-    if (Number.isNaN(then)) return null;
-    return Math.max(0, Math.floor((Date.now() - then) / 86_400_000));
   }
 }

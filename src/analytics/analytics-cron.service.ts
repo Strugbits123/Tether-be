@@ -85,61 +85,97 @@ export class AnalyticsCronService {
   @Cron(CronExpression.EVERY_DAY_AT_3AM)
   async memoirAbandoned(): Promise<void> {
     try {
-      const cutoffMs = Date.now() - MEMOIR_ABANDON_DAYS * DAY_MS;
+      const cutoff = new Date(Date.now() - MEMOIR_ABANDON_DAYS * DAY_MS).toISOString();
 
       const { data: memoirs } = await this.supabase
         .getClient()
         .from('memoirs')
-        .select('id, user_id, abandoned_at')
+        .select('id, user_id')
         .is('abandoned_at', null);
 
       for (const memoir of memoirs ?? []) {
-        const { data: chapters } = await this.supabase
+        // Claim + revalidate inactivity in one atomic statement: the RPC only
+        // marks the memoir when it's still unmarked, has chapters, and NO
+        // chapter has updated_at >= cutoff — so a chapter edited between listing
+        // and claiming can't produce a false marker/event. It returns the event
+        // props only when it actually claimed.
+        const { data, error } = await this.supabase
           .getClient()
-          .from('chapters')
-          .select('status, updated_at')
-          .eq('user_id', memoir.user_id);
+          .rpc('claim_memoir_abandoned', {
+            p_memoir_id: memoir.id,
+            p_user_id: memoir.user_id,
+            p_cutoff: cutoff,
+          });
 
-        const rows = chapters ?? [];
-        if (rows.length === 0) continue; // no chapters — nothing to abandon
-
-        const lastEdit = Math.max(
-          ...rows.map((c) => new Date(c.updated_at as string).getTime() || 0),
-        );
-        if (lastEdit >= cutoffMs) continue; // still active
-
-        const completed = rows.filter((c) => c.status === 'complete').length;
-
-        // Claim the marker first, conditional on it still being null, and check
-        // the result — only fire the event once the marker is durably set, so a
-        // failed write can't leave the event firing every run.
-        const { data: claimed, error: claimError } = await this.supabase
-          .getClient()
-          .from('memoirs')
-          .update({ abandoned_at: new Date().toISOString() })
-          .eq('id', memoir.id)
-          .is('abandoned_at', null)
-          .select('id');
-
-        if (claimError) {
+        if (error) {
           this.logger.warn(
-            `memoir_abandoned claim failed for ${memoir.id}: ${claimError.message}`,
+            `claim_memoir_abandoned failed for ${memoir.id}: ${error.message}`,
           );
           continue;
         }
-        if (!claimed || claimed.length === 0) continue; // already claimed
+        const claimed = (data as
+          | { chapters_completed: number; days_since_last_edit: number }[]
+          | null)?.[0];
+        if (!claimed) continue; // not claimed (already marked, no chapters, or active)
 
         this.posthog.capture(memoir.user_id, 'memoir_abandoned', {
-          chapters_completed: completed,
-          days_since_last_edit: Math.max(
-            0,
-            Math.floor((Date.now() - lastEdit) / DAY_MS),
-          ),
+          chapters_completed: claimed.chapters_completed,
+          days_since_last_edit: claimed.days_since_last_edit,
         });
       }
     } catch (err) {
       this.logger.error(
         'memoir_abandoned job failed',
+        err instanceof Error ? err.stack : err,
+      );
+    }
+  }
+
+  // Drain the analytics outbox: publish durably-enqueued lifecycle events to
+  // PostHog, using each row id as the event uuid so a re-send is de-duplicated.
+  // Runs frequently so committed-but-unpublished events surface quickly.
+  @Cron(CronExpression.EVERY_MINUTE)
+  async drainAnalyticsOutbox(): Promise<void> {
+    try {
+      const { data: rows, error } = await this.supabase
+        .getClient()
+        .from('analytics_outbox')
+        .select('id, distinct_id, event, properties, attempts')
+        .is('published_at', null)
+        .lt('attempts', 10)
+        .order('created_at', { ascending: true })
+        .limit(200);
+
+      if (error) {
+        this.logger.warn(`analytics_outbox read failed: ${error.message}`);
+        return;
+      }
+
+      for (const row of rows ?? []) {
+        // Bump attempts first so a repeatedly-failing row eventually stops being
+        // retried (and can't wedge the drain).
+        await this.supabase
+          .getClient()
+          .from('analytics_outbox')
+          .update({ attempts: (row.attempts ?? 0) + 1 })
+          .eq('id', row.id);
+
+        this.posthog.capture(
+          row.distinct_id,
+          row.event,
+          (row.properties ?? {}) as Record<string, unknown>,
+          row.id, // idempotency key — PostHog dedupes by uuid
+        );
+
+        await this.supabase
+          .getClient()
+          .from('analytics_outbox')
+          .update({ published_at: new Date().toISOString() })
+          .eq('id', row.id);
+      }
+    } catch (err) {
+      this.logger.error(
+        'drain_analytics_outbox job failed',
         err instanceof Error ? err.stack : err,
       );
     }

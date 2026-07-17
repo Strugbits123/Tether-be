@@ -23,7 +23,14 @@ export class PostHogService implements OnModuleDestroy {
     }
   }
 
-  capture(distinctId: string, event: string, properties?: Record<string, any>) {
+  capture(
+    distinctId: string,
+    event: string,
+    properties?: Record<string, any>,
+    // Optional idempotency key (PostHog dedupes events by uuid) — pass the
+    // outbox row id so a re-published lifecycle event isn't double-counted.
+    uuid?: string,
+  ) {
     if (!this.client) return;
 
     try {
@@ -39,6 +46,7 @@ export class PostHogService implements OnModuleDestroy {
           environment: this.environment,
           source: 'server',
         },
+        ...(uuid ? { uuid } : {}),
       });
     } catch (err) {
       this.logger.error('PostHog capture failed', err instanceof Error ? err.stack : err);
