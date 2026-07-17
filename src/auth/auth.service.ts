@@ -7,6 +7,8 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
+import { PostHogService } from '../shared/posthog/posthog.service.js';
+import { AnalyticsService } from '../shared/posthog/analytics.service.js';
 import { SignupDto } from './dto/signup.dto.js';
 import { LoginDto } from './dto/login.dto.js';
 import { MagicLinkDto } from './dto/magic-link.dto.js';
@@ -18,18 +20,52 @@ export class AuthService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly config: ConfigService,
+    private readonly posthog: PostHogService,
+    private readonly analytics: AnalyticsService,
   ) {}
 
   async signup(dto: SignupDto) {
+    // Pre-flight: check if this email already has a row in public.users.
+    // This catches cases where a Google-OAuth user later attempts an
+    // email/password signup, which can bypass the identities-array check
+    // and trigger a second DB row via the handle_new_user trigger.
+    // Wrapped in try/catch so a transient query failure never blocks signup.
+    try {
+      const { data: existingUser } = await this.supabase
+        .getClient()
+        .from('users')
+        .select('id')
+        .eq('email', dto.email.toLowerCase())
+        .maybeSingle();
+
+      if (existingUser) {
+        throw new ConflictException(
+          'An account with this email already exists. Please sign in or reset your password.',
+        );
+      }
+    } catch (e) {
+      if (e instanceof ConflictException) throw e;
+      // Transient DB error — proceed and let Supabase auth be the authority.
+    }
+
     const { data, error } = await this.supabase.getPublicClient().auth.signUp({
       email: dto.email,
       password: dto.password,
       options: {
         emailRedirectTo: `${this.config.get('FRONTEND_URL')}/auth/callback`,
+        data: {
+          first_name: dto.first_name ?? null,
+          last_name: dto.last_name ?? null,
+        },
       },
     });
 
     if (error) {
+      if (error.message.toLowerCase().includes('already registered')) {
+        throw new ConflictException(
+          'An account with this email already exists. Please sign in or reset your password.',
+        );
+      }
       throw new BadRequestException(error.message);
     }
 
@@ -45,16 +81,45 @@ export class AuthService {
       );
     }
 
+    if (data.user?.id) {
+      this.posthog.capture(data.user.id, 'account_created', {
+        signup_method: 'email',
+        provider: 'email',
+        acquisition_source: dto.acquisition_source ?? null,
+        utm_source: dto.utm_source ?? null,
+        utm_medium: dto.utm_medium ?? null,
+        utm_campaign: dto.utm_campaign ?? null,
+        utm_term: dto.utm_term ?? null,
+        utm_content: dto.utm_content ?? null,
+        referrer: dto.referrer ?? null,
+      });
+      // Person profile: email is retained for support/lookups; plan_tier seeds
+      // segmentation (defaults to 'free' until billing is wired up). No names
+      // are sent as person properties — PII guardrail.
+      this.posthog.identify(data.user.id, {
+        email: data.user.email,
+        created_at: new Date().toISOString(),
+        plan_tier: 'free',
+      });
+    }
+
     return {
       message:
         'Account created. Please check your email to verify your account.',
       user_id: data.user?.id ?? null,
+      session: data.session
+        ? {
+            access_token: data.session.access_token,
+            refresh_token: data.session.refresh_token,
+            expires_at: data.session.expires_at,
+          }
+        : null,
     };
   }
 
   async login(dto: LoginDto) {
     const { data, error } = await this.supabase
-      .getClient()
+      .getPublicClient()
       .auth.signInWithPassword({
         email: dto.email,
         password: dto.password,
@@ -78,6 +143,10 @@ export class AuthService {
       .update({ last_login_at: new Date().toISOString() })
       .eq('id', data.user.id);
 
+    // Refresh PostHog person properties on the backend, where the full user
+    // record and related counts are available (the browser only sets email).
+    this.analytics.identifyUser(data.user.id).catch(() => null);
+
     return {
       access_token: data.session.access_token,
       refresh_token: data.session.refresh_token,
@@ -90,7 +159,7 @@ export class AuthService {
   }
 
   async magicLink(dto: MagicLinkDto) {
-    const { error } = await this.supabase.getClient().auth.signInWithOtp({
+    const { error } = await this.supabase.getPublicClient().auth.signInWithOtp({
       email: dto.email,
       options: {
         emailRedirectTo: `${this.config.get('FRONTEND_URL')}/auth/callback`,
@@ -111,13 +180,30 @@ export class AuthService {
 
   async resetPassword(dto: ResetPasswordDto) {
     const { error } = await this.supabase
-      .getClient()
+      .getPublicClient()
       .auth.resetPasswordForEmail(dto.email, {
         redirectTo: `${this.config.get('FRONTEND_URL')}/auth/reset-password`,
       });
 
     if (error) {
       throw new InternalServerErrorException('Failed to send reset email');
+    }
+
+    // Best-effort analytics: resolve the account id by email so the event is
+    // attributed to the right person. Only fired when a matching user exists;
+    // this is server-side only and never changes the anti-enumeration response.
+    try {
+      const { data: user } = await this.supabase
+        .getClient()
+        .from('users')
+        .select('id')
+        .eq('email', dto.email.toLowerCase())
+        .maybeSingle();
+      if (user?.id) {
+        this.posthog.capture(user.id, 'password_reset_requested', {});
+      }
+    } catch {
+      // ignore — analytics must not affect the reset flow
     }
 
     // Always return success to prevent email enumeration
@@ -190,5 +276,21 @@ export class AuthService {
     }
 
     return { url: data.url };
+  }
+
+  // Invoked by the Supabase auth Database Webhook (UPDATE on auth.users).
+  // Fires email_verified exactly once, on the null -> confirmed transition.
+  handleEmailVerified(payload: {
+    type?: string;
+    record?: { id?: string; email_confirmed_at?: string | null };
+    old_record?: { email_confirmed_at?: string | null };
+  }) {
+    const record = payload.record;
+    const justConfirmed =
+      !!record?.email_confirmed_at && !payload.old_record?.email_confirmed_at;
+
+    if (record?.id && justConfirmed) {
+      this.posthog.capture(record.id, 'email_verified', { provider: 'email' });
+    }
   }
 }

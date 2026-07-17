@@ -14,10 +14,15 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
+import {
+  ASSIGNMENT_SCOPES,
+  GROUP_VALUES,
+} from '../../common/constants/assignments.js';
 
 export class PhotoItemDto {
   @IsString()
   @IsNotEmpty()
+  @MaxLength(500)
   storagePath: string;
 
   @IsIn(['jpeg', 'jpg', 'png', 'heic', 'webp'])
@@ -30,19 +35,28 @@ export class PhotoItemDto {
 
   @IsOptional()
   @IsInt()
+  @Min(1)
+  @Max(20000)
   width?: number | null;
 
   @IsOptional()
   @IsInt()
+  @Min(1)
+  @Max(20000)
   height?: number | null;
-}
-
-export class AssignmentDto {
-  @IsIn(['all', 'group', 'release_manager', 'assign_later', 'individual'])
-  scope: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(200)
+  title?: string | null;
+}
+
+export class AssignmentDto {
+  @IsIn([...ASSIGNMENT_SCOPES])
+  scope: string;
+
+  @IsOptional()
+  @IsIn([...GROUP_VALUES])
   groupValue?: string | null;
 
   @IsOptional()
@@ -62,6 +76,10 @@ export class CreatePhotosBatchDto {
   @IsString()
   @MaxLength(2000)
   caption?: string | null;
+
+  @IsOptional()
+  @IsUUID()
+  folderId?: string | null;
 
   @IsArray()
   @ValidateNested({ each: true })

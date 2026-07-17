@@ -10,5 +10,6 @@ export class ConfirmUploadDto {
 
   @IsInt()
   @Min(1)
+  @Max(524288000)
   fileSizeBytes: number;
 }

@@ -7,11 +7,12 @@ import {
   MaxLength,
 } from 'class-validator';
 
+// Standardized to three relationships platform-wide; these map 1:1 to the
+// assignment groups (family/friends/others). Legacy partner/colleague values
+// are migrated to `other` (see db/standardize-relationships.sql).
 export enum RelationshipType {
   FAMILY = 'family',
   FRIEND = 'friend',
-  PARTNER = 'partner',
-  COLLEAGUE = 'colleague',
   OTHER = 'other',
 }
 

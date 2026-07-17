@@ -11,9 +11,5 @@ export class HealthController {
     };
   }
 
-  // REMOVE AFTER SENTRY VERIFICATION
-  @Get('error-test')
-  errorTest() {
-    throw new Error('Sentry test error');
-  }
+
 }

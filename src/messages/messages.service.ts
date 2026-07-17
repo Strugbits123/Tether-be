@@ -10,6 +10,8 @@ import { ConfigService } from '@nestjs/config';
 import Mux from '@mux/mux-node';
 import { DeepgramClient } from '@deepgram/sdk';
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
+import { PostHogService } from '../shared/posthog/posthog.service.js';
+import { AnalyticsService } from '../shared/posthog/analytics.service.js';
 import { AssignmentDto } from './dto/assignment.dto.js';
 import { CreateTextMessageDto } from './dto/create-text-message.dto.js';
 import { CreateVideoMessageDto } from './dto/create-video-message.dto.js';
@@ -34,12 +36,29 @@ function stripHtmlTags(html: string): string {
     .trim();
 }
 
+const TRANSCRIPTION_TIMEOUT_MS = 120_000;
+
+// Bounds an external call so a hang can't leave a row stuck 'processing'
+// forever — the rejection flows into the existing catch → status 'failed'.
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${ms}ms`)),
+      ms,
+    );
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 @Injectable()
 export class MessagesService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly config: ConfigService,
     private readonly activityService: ActivityService,
+    private readonly posthog: PostHogService,
+    private readonly analytics: AnalyticsService,
   ) {}
 
   private getMuxClient(): Mux {
@@ -61,6 +80,10 @@ export class MessagesService {
   // ─── Text message ──────────────────────────────────────────────────────────
 
   async createTextMessage(userId: string, dto: CreateTextMessageDto) {
+    // Authorize recipients before persisting anything, so an invalid recipient
+    // returns 403 without leaving an orphaned message row.
+    await this.authorizeAssignmentRecipients(userId, dto.assignments);
+
     const { data: message, error } = await this.supabase
       .getClient()
       .from('messages')
@@ -84,7 +107,9 @@ export class MessagesService {
     }
 
     await this.createAssignments(userId, message.id, dto.assignments);
-    this.markOnboardingCreateMessage(userId).catch(() => null);
+    this.analytics
+      .markOnboardingStep(userId, 'create_message')
+      .catch(() => null);
     this.activityService.log(
       userId,
       'message_created',
@@ -95,12 +120,20 @@ export class MessagesService {
         title: dto.title,
       },
     );
+    // Text is fully saved on creation, so message_saved fires now.
+    await this.fireMessageSaved(userId, message.id, 'written', null, {
+      char_count: stripHtmlTags(dto.body).length,
+    });
     return message;
   }
 
   // ─── Video message ─────────────────────────────────────────────────────────
 
   async createVideoUploadUrl(userId: string, dto: CreateVideoMessageDto) {
+    // Authorize recipients before creating the Mux upload / message row, so an
+    // invalid recipient can't leave orphaned content.
+    await this.authorizeAssignmentRecipients(userId, dto.assignments);
+
     const mux = this.getMuxClient();
     const frontendUrl =
       this.config.get<string>('FRONTEND_URL') ?? 'http://localhost:3000';
@@ -140,7 +173,9 @@ export class MessagesService {
     }
 
     await this.createAssignments(userId, message.id, dto.assignments);
-    this.markOnboardingCreateMessage(userId).catch(() => null);
+    this.analytics
+      .markOnboardingStep(userId, 'create_message')
+      .catch(() => null);
     this.activityService.log(
       userId,
       'message_created',
@@ -151,7 +186,8 @@ export class MessagesService {
         title: dto.title,
       },
     );
-
+    // message_created for video is emitted from the Mux 'asset.ready' webhook,
+    // where the real duration_sec is known.
     return {
       messageId: message.id,
       uploadUrl: upload.url,
@@ -162,6 +198,9 @@ export class MessagesService {
   // ─── Audio message ─────────────────────────────────────────────────────────
 
   async createAudioUploadUrl(userId: string, dto: CreateAudioMessageDto) {
+    // Authorize recipients before minting the upload URL / message row.
+    await this.authorizeAssignmentRecipients(userId, dto.assignments);
+
     const ext = AUDIO_MIME_TO_EXT[dto.fileType] ?? 'webm';
     const storagePath = `${userId}/${randomUUID()}.${ext}`;
 
@@ -171,7 +210,6 @@ export class MessagesService {
       .createSignedUploadUrl(storagePath);
 
     if (urlError) {
-      console.error('Error creating audio upload URL:', urlError);
       throw new InternalServerErrorException(
         'Failed to generate audio upload URL',
       );
@@ -196,12 +234,13 @@ export class MessagesService {
       .single();
 
     if (error || !message) {
-      console.error('messages audio INSERT error:', JSON.stringify(error));
       throw new InternalServerErrorException('Failed to create message record');
     }
 
     await this.createAssignments(userId, message.id, dto.assignments);
-    this.markOnboardingCreateMessage(userId).catch(() => null);
+    this.analytics
+      .markOnboardingStep(userId, 'create_message')
+      .catch(() => null);
     this.activityService.log(
       userId,
       'message_created',
@@ -212,7 +251,8 @@ export class MessagesService {
         title: dto.title,
       },
     );
-
+    // message_created for audio is emitted on confirmUpload, where duration_sec
+    // and file size are known.
     return {
       messageId: message.id,
       signedUploadUrl: data.signedUrl,
@@ -249,9 +289,16 @@ export class MessagesService {
       .single();
 
     if (error || !updated) {
-      console.error('Error confirming audio upload:', JSON.stringify(error));
       throw new InternalServerErrorException('Failed to confirm upload');
     }
+
+    // Audio is fully saved once the upload is confirmed and duration is known.
+    await this.fireMessageSaved(
+      userId,
+      messageId,
+      'audio',
+      updated.duration_seconds ?? null,
+    );
 
     this.transcribeAudio(messageId, message.storage_path).catch(() => null);
     return updated;
@@ -263,7 +310,9 @@ export class MessagesService {
     const { data, error } = await this.supabase
       .getClient()
       .from('messages')
-      .select('*')
+      .select(
+        'id, user_id, type, title, notes, body, processing_status, transcription_status, transcript, duration_seconds, file_size_bytes, display_order, created_at, updated_at',
+      )
       .eq('user_id', userId)
       .order('display_order', { ascending: true })
       .order('created_at', { ascending: false });
@@ -272,7 +321,7 @@ export class MessagesService {
       throw new InternalServerErrorException('Failed to fetch messages');
     }
 
-    return Promise.all((data ?? []).map((m) => this.attachAudioUrl(m, 3600)));
+    return data ?? [];
   }
 
   // ─── Single message ────────────────────────────────────────────────────────
@@ -360,6 +409,27 @@ export class MessagesService {
   ) {
     await this.requireOwnedMessage(userId, messageId);
 
+    // Authorize recipients BEFORE any mutation so a cross-tenant recipient
+    // can't change title/body/notes and then fail with 403.
+    let assignmentRows:
+      | { assignment_scope: string; group_value: string | null; recipient_id: string | null }[]
+      | null = null;
+    if (dto.assignments !== undefined) {
+      const effective =
+        dto.assignments.length > 0 ? dto.assignments : [{ scope: 'assign_later' }];
+      await this.assertRecipientsOwned(
+        userId,
+        effective
+          .filter((a) => a.scope === 'individual' && a.recipientId)
+          .map((a) => a.recipientId as string),
+      );
+      assignmentRows = effective.map((a) => ({
+        assignment_scope: a.scope,
+        group_value: a.scope === 'group' ? (a.groupValue ?? null) : null,
+        recipient_id: a.scope === 'individual' ? (a.recipientId ?? null) : null,
+      }));
+    }
+
     const updates: Record<string, unknown> = {
       updated_at: new Date().toISOString(),
     };
@@ -382,15 +452,20 @@ export class MessagesService {
       throw new InternalServerErrorException('Failed to update message');
     }
 
-    if (dto.assignments !== undefined) {
-      await this.supabase
+    if (assignmentRows !== null) {
+      // Transactional replace: delete + insert in one RPC so a failed insert
+      // can't permanently leave the message unassigned.
+      const { error: replaceError } = await this.supabase
         .getClient()
-        .from('content_assignments')
-        .delete()
-        .eq('content_type', 'message')
-        .eq('content_id', messageId);
-
-      await this.createAssignments(userId, messageId, dto.assignments);
+        .rpc('replace_content_assignments', {
+          p_user_id: userId,
+          p_content_type: 'message',
+          p_content_id: messageId,
+          p_rows: assignmentRows,
+        });
+      if (replaceError) {
+        throw new InternalServerErrorException('Failed to update assignments');
+      }
     }
 
     return updated;
@@ -399,14 +474,21 @@ export class MessagesService {
   // ─── Reorder messages ──────────────────────────────────────────────────────
 
   async reorderMessages(userId: string, dto: ReorderMessagesDto) {
-    for (const item of dto.order) {
-      await this.supabase
-        .getClient()
-        .from('messages')
-        .update({ display_order: item.displayOrder })
-        .eq('id', item.messageId)
-        .eq('user_id', userId);
+    // One transactional statement scoped to the owner; the RPC rolls back and
+    // errors unless every requested id was updated, so a partial reorder can't
+    // commit while we report success.
+    const { error } = await this.supabase.getClient().rpc('reorder_messages', {
+      p_user_id: userId,
+      p_order: dto.order.map((item) => ({
+        id: item.messageId,
+        display_order: item.displayOrder,
+      })),
+    });
+
+    if (error) {
+      throw new InternalServerErrorException('Failed to reorder messages');
     }
+
     return { message: 'Messages reordered' };
   }
 
@@ -419,8 +501,8 @@ export class MessagesService {
       try {
         const mux = this.getMuxClient();
         await mux.video.assets.delete(message.mux_asset_id);
-      } catch (e) {
-        console.error('Mux asset delete failed:', e);
+      } catch {
+        // non-fatal: asset already deleted or Mux unreachable
       }
     }
 
@@ -441,6 +523,11 @@ export class MessagesService {
       throw new InternalServerErrorException('Failed to delete message');
     }
 
+    this.posthog.capture(userId, 'message_deleted', {
+      message_type: this.analyticsType(message.type as string),
+      age_days: this.ageDays(message.created_at as string | null),
+    });
+
     return { message: 'Message deleted' };
   }
 
@@ -453,16 +540,11 @@ export class MessagesService {
     const playbackId = playbackIds?.[0]?.id ?? null;
     const uploadId = data.upload_id as string;
 
-    const { data: message } = await this.supabase
-      .getClient()
-      .from('messages')
-      .select('*')
-      .eq('mux_upload_id', uploadId)
-      .single();
-
-    if (!message) return;
-
-    await this.supabase
+    // Transition to 'ready' only if not already ready, and gate all follow-up
+    // work on that one-time transition. A duplicate video.asset.ready delivery
+    // updates zero rows here, so analytics can't double-count and transcription
+    // isn't retriggered.
+    const { data: transitioned } = await this.supabase
       .getClient()
       .from('messages')
       .update({
@@ -472,11 +554,24 @@ export class MessagesService {
         duration_seconds: Math.round((data.duration as number) ?? 0),
         updated_at: new Date().toISOString(),
       })
-      .eq('id', message.id);
+      .eq('mux_upload_id', uploadId)
+      .neq('processing_status', 'ready')
+      .select('id, user_id')
+      .maybeSingle();
+
+    if (!transitioned) return; // unknown upload, or already-ready duplicate
 
     if (playbackId) {
-      this.transcribeVideo(message.id, playbackId).catch(() => null);
+      this.transcribeVideo(transitioned.id, playbackId).catch(() => null);
     }
+
+    // Video is fully saved once Mux finishes processing the asset.
+    await this.fireMessageSaved(
+      transitioned.user_id,
+      transitioned.id,
+      'video',
+      Math.round((data.duration as number) ?? 0),
+    );
   }
 
   async handleMuxAssetErrored(event: Record<string, unknown>) {
@@ -503,16 +598,38 @@ export class MessagesService {
       return;
     }
 
-    // Mux HLS stream requires a signed token — use audio-only rendition via public playback URL
-    const muxPlaybackUrl = `https://stream.mux.com/${playbackId}.m3u8`;
+    // Assets use signed playback policy — generate a short-lived JWT for Deepgram.
+    const signingKey = this.config.get<string>('MUX_SIGNING_KEY');
+    const privateKey = this.config.get<string>('MUX_PRIVATE_KEY');
+    if (!signingKey || !privateKey) {
+      await this.setTranscriptionFailed(messageId);
+      return;
+    }
+
+    let muxPlaybackUrl: string;
+    try {
+      const mux = this.getMuxClient();
+      const jwtToken = await mux.jwt.signPlaybackId(playbackId, {
+        type: 'video',
+        expiration: '1h',
+      });
+      muxPlaybackUrl = `https://stream.mux.com/${playbackId}.m3u8?token=${jwtToken}`;
+    } catch {
+      await this.setTranscriptionFailed(messageId);
+      return;
+    }
 
     try {
       const client = new DeepgramClient({ apiKey });
-      const response = await client.listen.v1.media.transcribeUrl({
-        url: muxPlaybackUrl,
-        model: 'nova-2',
-        smart_format: true,
-      });
+      const response = await withTimeout(
+        client.listen.v1.media.transcribeUrl({
+          url: muxPlaybackUrl,
+          model: 'nova-2',
+          smart_format: true,
+        }),
+        TRANSCRIPTION_TIMEOUT_MS,
+        'Deepgram video transcription',
+      );
       const r = response as unknown as {
         results?: {
           channels?: Array<{ alternatives?: Array<{ transcript?: string }> }>;
@@ -554,11 +671,15 @@ export class MessagesService {
 
     try {
       const client = new DeepgramClient({ apiKey });
-      const response = await client.listen.v1.media.transcribeUrl({
-        url: urlData.signedUrl,
-        model: 'nova-2',
-        smart_format: true,
-      });
+      const response = await withTimeout(
+        client.listen.v1.media.transcribeUrl({
+          url: urlData.signedUrl,
+          model: 'nova-2',
+          smart_format: true,
+        }),
+        TRANSCRIPTION_TIMEOUT_MS,
+        'Deepgram audio transcription',
+      );
       const r = response as unknown as {
         results?: {
           channels?: Array<{ alternatives?: Array<{ transcript?: string }> }>;
@@ -599,11 +720,10 @@ export class MessagesService {
       .from('messages')
       .select('*')
       .eq('id', messageId)
+      .eq('user_id', userId)
       .single();
 
     if (error || !message) throw new NotFoundException('Message not found');
-    if (message.user_id !== userId)
-      throw new ForbiddenException('Not your message');
     return message;
   }
 
@@ -615,23 +735,77 @@ export class MessagesService {
     const effective =
       assignments.length > 0 ? assignments : [{ scope: 'assign_later' }];
 
-    for (const a of effective) {
-      const { error } = await this.supabase
-        .getClient()
-        .from('content_assignments')
-        .insert({
-          user_id: userId,
-          content_type: 'message',
-          content_id: messageId,
-          assignment_scope: a.scope,
-          group_value: a.scope === 'group' ? (a.groupValue ?? null) : null,
-          recipient_id:
-            a.scope === 'individual' ? (a.recipientId ?? null) : null,
-        });
+    // Cross-tenant guard: individual recipients must belong to this user.
+    await this.assertRecipientsOwned(
+      userId,
+      effective
+        .filter((a) => a.scope === 'individual' && a.recipientId)
+        .map((a) => a.recipientId as string),
+    );
 
-      if (error) {
-        throw new InternalServerErrorException('Failed to create assignment');
-      }
+    // Single batched insert instead of one round trip per assignment.
+    const rows = effective.map((a) => ({
+      user_id: userId,
+      content_type: 'message',
+      content_id: messageId,
+      assignment_scope: a.scope,
+      group_value: a.scope === 'group' ? (a.groupValue ?? null) : null,
+      recipient_id: a.scope === 'individual' ? (a.recipientId ?? null) : null,
+    }));
+
+    const { error } = await this.supabase
+      .getClient()
+      .from('content_assignments')
+      .insert(rows);
+
+    if (error) {
+      throw new InternalServerErrorException('Failed to create assignment');
+    }
+
+    // Fire message_assigned only when the user actually assigned recipients
+    // (not the implicit 'assign_later' default). recipient_count reflects the
+    // number of individually-named recipients.
+    const hasExplicitAssignment = assignments.some(
+      (a) => a.scope !== 'assign_later',
+    );
+    if (hasExplicitAssignment) {
+      this.posthog.capture(userId, 'message_assigned', {
+        recipient_count: assignments.filter((a) => a.scope === 'individual')
+          .length,
+      });
+    }
+  }
+
+  // Authorize the individual recipients referenced by an assignment list.
+  private async authorizeAssignmentRecipients(
+    userId: string,
+    assignments: AssignmentDto[],
+  ) {
+    await this.assertRecipientsOwned(
+      userId,
+      assignments
+        .filter((a) => a.scope === 'individual' && a.recipientId)
+        .map((a) => a.recipientId as string),
+    );
+  }
+
+  private async assertRecipientsOwned(userId: string, recipientIds: string[]) {
+    const unique = [...new Set(recipientIds)];
+    if (unique.length === 0) return;
+    const { data, error } = await this.supabase
+      .getClient()
+      .from('recipients')
+      .select('id')
+      .eq('user_id', userId)
+      .in('id', unique);
+    // Surface a real query failure as 500 instead of masking it as "not owned".
+    if (error) {
+      throw new InternalServerErrorException('Failed to verify recipients');
+    }
+    if ((data?.length ?? 0) !== unique.length) {
+      throw new ForbiddenException(
+        'One or more recipients do not belong to this account',
+      );
     }
   }
 
@@ -657,34 +831,71 @@ export class MessagesService {
       .eq('id', messageId);
   }
 
-  private async markOnboardingCreateMessage(userId: string) {
-    const { data } = await this.supabase
+  // Maps the stored message type ('text'|'audio'|'video') to the tracking-plan
+  // vocabulary ('written'|'audio'|'video') so recorder and message events share
+  // one message_type value space.
+  private analyticsType(dbType: string): string {
+    return dbType === 'text' ? 'written' : dbType;
+  }
+
+  private ageDays(createdAt: string | null): number | null {
+    if (!createdAt) return null;
+    const created = new Date(createdAt).getTime();
+    if (Number.isNaN(created)) return null;
+    return Math.max(0, Math.floor((Date.now() - created) / 86_400_000));
+  }
+
+  // Fires message_saved (with recipient_count derived from the message's
+  // individual assignments) and, when it's the account's only message so far,
+  // first_message_recorded.
+  private async fireMessageSaved(
+    userId: string,
+    messageId: string,
+    messageType: string,
+    durationSeconds: number | null,
+    extra?: Record<string, any>,
+  ) {
+    const { count: recipientCount } = await this.supabase
+      .getClient()
+      .from('content_assignments')
+      .select('id', { count: 'exact', head: true })
+      .eq('content_type', 'message')
+      .eq('content_id', messageId)
+      .eq('assignment_scope', 'individual');
+
+    this.posthog.capture(userId, 'message_saved', {
+      message_type: messageType,
+      duration_seconds: durationSeconds,
+      recipient_count: recipientCount ?? 0,
+      // Scheduled delivery is not part of this backend subset yet.
+      has_scheduled_date: false,
+      ...extra,
+    });
+
+    await this.maybeFireFirstMessage(userId, messageType);
+  }
+
+  private async maybeFireFirstMessage(userId: string, messageType: string) {
+    const { count } = await this.supabase
+      .getClient()
+      .from('messages')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId);
+
+    if ((count ?? 0) !== 1) return;
+
+    const { data: user } = await this.supabase
       .getClient()
       .from('users')
-      .select('onboarding')
+      .select('created_at')
       .eq('id', userId)
       .single();
 
-    if (!data) return;
-
-    const onboarding = (data.onboarding ?? {}) as Record<string, unknown>;
-    onboarding['create_message'] = true;
-
-    const steps = [
-      'finish_account',
-      'add_release_manager',
-      'add_recipients',
-      'add_photos',
-      'create_message',
-    ];
-    if (steps.every((s) => onboarding[s] === true)) {
-      onboarding['completed_at'] = new Date().toISOString();
-    }
-
-    await this.supabase
-      .getClient()
-      .from('users')
-      .update({ onboarding, updated_at: new Date().toISOString() })
-      .eq('id', userId);
+    this.posthog.capture(userId, 'first_message_recorded', {
+      days_since_signup: this.ageDays(
+        (user?.created_at as string | null) ?? null,
+      ),
+      message_type: messageType,
+    });
   }
 }
