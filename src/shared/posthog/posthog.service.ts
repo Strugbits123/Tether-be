@@ -53,11 +53,20 @@ export class PostHogService implements OnModuleDestroy {
     }
   }
 
+  /** Whether a PostHog client is configured (POSTHOG_API_KEY present). */
+  isEnabled(): boolean {
+    return this.client !== null;
+  }
+
   /**
    * Awaited capture — resolves only after the event is actually sent to PostHog
    * (not just queued). Used by the outbox drainer so an outbox row is marked
    * published only once delivery succeeds. Throws on send failure so the caller
    * leaves the row unpublished for retry.
+   *
+   * Throws when no client is configured, so a caller can never mistake a
+   * dropped (undelivered) event for a successful send — the outbox drainer
+   * additionally gates on isEnabled() so it doesn't even attempt this.
    */
   async captureImmediate(
     distinctId: string,
@@ -65,7 +74,9 @@ export class PostHogService implements OnModuleDestroy {
     properties?: Record<string, any>,
     uuid?: string,
   ): Promise<void> {
-    if (!this.client) return;
+    if (!this.client) {
+      throw new Error('PostHog client not configured (POSTHOG_API_KEY missing)');
+    }
     await this.client.captureImmediate({
       distinctId,
       event,

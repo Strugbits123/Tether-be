@@ -136,6 +136,17 @@ export class AnalyticsCronService {
   // Runs frequently so committed-but-unpublished events surface quickly.
   @Cron(CronExpression.EVERY_MINUTE)
   async drainAnalyticsOutbox(): Promise<void> {
+    // If PostHog isn't configured, don't drain — leaving rows unpublished (and
+    // a warning) is far safer than marking them published without delivery. In
+    // dev this is expected; in prod a missing key is a loud, recoverable signal
+    // (events stay queued until the key is restored).
+    if (!this.posthog.isEnabled()) {
+      this.logger.warn(
+        'analytics_outbox not drained: PostHog is not configured (POSTHOG_API_KEY missing)',
+      );
+      return;
+    }
+
     try {
       const { data: rows, error } = await this.supabase
         .getClient()
