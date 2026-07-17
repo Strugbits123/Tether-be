@@ -1,5 +1,6 @@
 import { UpdateProfileDto } from './dto/update-profile.dto.js';
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
+import { PostHogService } from '../shared/posthog/posthog.service.js';
 import {
   Injectable,
   InternalServerErrorException,
@@ -7,19 +8,24 @@ import {
 } from '@nestjs/common';
 import { ImageMimeType } from './dto/avatar-upload.dto.js';
 import { ActivityService } from '../activity/activity.service.js';
+import { AnalyticsService } from '../shared/posthog/analytics.service.js';
 
 @Injectable()
 export class UsersService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly activityService: ActivityService,
+    private readonly posthog: PostHogService,
+    private readonly analytics: AnalyticsService,
   ) {}
 
   async getMe(userId: string) {
     const { data, error } = await this.supabase
       .getClient()
       .from('users')
-      .select('*')
+      .select(
+        'id, email, first_name, last_name, full_name, date_of_birth, zip_code, state, age_group, gender, relationship_status, phone_number, avatar_url, sms_opted_in, account_status, auth_provider, role, onboarding, created_at, updated_at, last_login_at',
+      )
       .eq('id', userId)
       .single();
 
@@ -55,50 +61,22 @@ export class UsersService {
         (currentUser?.onboarding as Record<string, unknown> | null)
           ?.finish_account === true;
 
-      await this.completeOnboardingStep(userId, 'finish_account');
+      // Centralized: sets finish_account, fires onboarding_completed +
+      // account_activated on the final step, and refreshes person properties.
+      await this.analytics.markOnboardingStep(userId, 'finish_account');
 
       if (!wasCompleted) {
         this.activityService.log(userId, 'profile_completed', 'Profile completed', {});
+        this.posthog.capture(userId, 'profile_completed', {
+          has_avatar: !!dto.avatar_url,
+          age_band: dto.age_group ?? null,
+          gender: dto.gender ?? null,
+        });
       }
     }
 
     // Fetch updated row separately
     return this.getMe(userId);
-  }
-
-  async completeOnboardingStep(userId: string, step: string) {
-    const { data: user } = await this.supabase
-      .getClient()
-      .from('users')
-      .select('onboarding')
-      .eq('id', userId)
-      .single();
-
-    if (!user) return;
-
-    const onboarding = user.onboarding as Record<
-      string,
-      boolean | string | null
-    >;
-    onboarding[step] = true;
-
-    const steps = [
-      'finish_account',
-      'add_release_manager',
-      'add_recipients',
-      'add_photos',
-      'create_message',
-    ];
-    const allComplete = steps.every((s) => onboarding[s] === true);
-    if (allComplete) {
-      onboarding['completed_at'] = new Date().toISOString();
-    }
-
-    await this.supabase
-      .getClient()
-      .from('users')
-      .update({ onboarding, updated_at: new Date().toISOString() })
-      .eq('id', userId);
   }
 
   async completeOnboarding(userId: string) {
@@ -129,7 +107,6 @@ export class UsersService {
       .eq('id', userId);
 
     if (error) {
-      console.error('completeOnboarding error:', JSON.stringify(error));
       throw new InternalServerErrorException('Failed to complete onboarding');
     }
 

@@ -17,6 +17,7 @@ export class CreateTextMessageDto {
 
   @IsString()
   @IsNotEmpty()
+  @MaxLength(50000)
   body: string;
 
   @IsOptional()

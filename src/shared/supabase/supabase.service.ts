@@ -55,19 +55,12 @@ export class SupabaseService {
   }
 
   getUserClient(accessToken: string): SupabaseClient {
-  const url = this.config.get<string>('SUPABASE_URL')!;
-  const key = this.config.get<string>('SUPABASE_SECRET_KEY')!;
+    const url = this.config.get<string>('SUPABASE_URL')!;
+    const key = this.config.get<string>('SUPABASE_SECRET_KEY')!;
 
-  return createClient(url, key, {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-    },
-    global: {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-      },
-    },
-  });
-}
+    return createClient(url, key, {
+      auth: { autoRefreshToken: false, persistSession: false },
+      global: { headers: { Authorization: `Bearer ${accessToken}` } },
+    });
+  }
 }

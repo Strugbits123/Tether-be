@@ -1,8 +1,10 @@
-import { Injectable, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
 
 @Injectable()
 export class ActivityService {
+  private readonly logger = new Logger(ActivityService.name);
+
   constructor(private readonly supabase: SupabaseService) {}
 
   async log(
@@ -23,7 +25,7 @@ export class ActivityService {
         });
       await result;
     } catch (err) {
-      console.error('Activity log failed:', err);
+      this.logger.error('Activity log failed', err instanceof Error ? err.stack : err);
     }
   }
 

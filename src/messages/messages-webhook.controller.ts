@@ -5,12 +5,15 @@ import {
   Post,
   Req,
   ServiceUnavailableException,
+  UseGuards,
 } from '@nestjs/common';
+import { ThrottlerGuard } from '@nestjs/throttler';
 import { Request } from 'express';
 import Mux from '@mux/mux-node';
 import { MessagesService } from './messages.service.js';
 
 @Controller('webhooks')
+@UseGuards(ThrottlerGuard)
 export class MessagesWebhookController {
   constructor(private readonly messagesService: MessagesService) {}
 
