@@ -80,6 +80,10 @@ export class MessagesService {
   // ─── Text message ──────────────────────────────────────────────────────────
 
   async createTextMessage(userId: string, dto: CreateTextMessageDto) {
+    // Authorize recipients before persisting anything, so an invalid recipient
+    // returns 403 without leaving an orphaned message row.
+    await this.authorizeAssignmentRecipients(userId, dto.assignments);
+
     const { data: message, error } = await this.supabase
       .getClient()
       .from('messages')
@@ -126,6 +130,10 @@ export class MessagesService {
   // ─── Video message ─────────────────────────────────────────────────────────
 
   async createVideoUploadUrl(userId: string, dto: CreateVideoMessageDto) {
+    // Authorize recipients before creating the Mux upload / message row, so an
+    // invalid recipient can't leave orphaned content.
+    await this.authorizeAssignmentRecipients(userId, dto.assignments);
+
     const mux = this.getMuxClient();
     const frontendUrl =
       this.config.get<string>('FRONTEND_URL') ?? 'http://localhost:3000';
@@ -190,6 +198,9 @@ export class MessagesService {
   // ─── Audio message ─────────────────────────────────────────────────────────
 
   async createAudioUploadUrl(userId: string, dto: CreateAudioMessageDto) {
+    // Authorize recipients before minting the upload URL / message row.
+    await this.authorizeAssignmentRecipients(userId, dto.assignments);
+
     const ext = AUDIO_MIME_TO_EXT[dto.fileType] ?? 'webm';
     const storagePath = `${userId}/${randomUUID()}.${ext}`;
 
@@ -398,6 +409,27 @@ export class MessagesService {
   ) {
     await this.requireOwnedMessage(userId, messageId);
 
+    // Authorize recipients BEFORE any mutation so a cross-tenant recipient
+    // can't change title/body/notes and then fail with 403.
+    let assignmentRows:
+      | { assignment_scope: string; group_value: string | null; recipient_id: string | null }[]
+      | null = null;
+    if (dto.assignments !== undefined) {
+      const effective =
+        dto.assignments.length > 0 ? dto.assignments : [{ scope: 'assign_later' }];
+      await this.assertRecipientsOwned(
+        userId,
+        effective
+          .filter((a) => a.scope === 'individual' && a.recipientId)
+          .map((a) => a.recipientId as string),
+      );
+      assignmentRows = effective.map((a) => ({
+        assignment_scope: a.scope,
+        group_value: a.scope === 'group' ? (a.groupValue ?? null) : null,
+        recipient_id: a.scope === 'individual' ? (a.recipientId ?? null) : null,
+      }));
+    }
+
     const updates: Record<string, unknown> = {
       updated_at: new Date().toISOString(),
     };
@@ -420,25 +452,20 @@ export class MessagesService {
       throw new InternalServerErrorException('Failed to update message');
     }
 
-    if (dto.assignments !== undefined) {
-      // Authorize recipients BEFORE clearing the existing assignments so a
-      // cross-tenant recipientId can't wipe the message's assignments and
-      // leave it unassigned when the update aborts.
-      await this.assertRecipientsOwned(
-        userId,
-        dto.assignments
-          .filter((a) => a.scope === 'individual' && a.recipientId)
-          .map((a) => a.recipientId as string),
-      );
-
-      await this.supabase
+    if (assignmentRows !== null) {
+      // Transactional replace: delete + insert in one RPC so a failed insert
+      // can't permanently leave the message unassigned.
+      const { error: replaceError } = await this.supabase
         .getClient()
-        .from('content_assignments')
-        .delete()
-        .eq('content_type', 'message')
-        .eq('content_id', messageId);
-
-      await this.createAssignments(userId, messageId, dto.assignments);
+        .rpc('replace_content_assignments', {
+          p_user_id: userId,
+          p_content_type: 'message',
+          p_content_id: messageId,
+          p_rows: assignmentRows,
+        });
+      if (replaceError) {
+        throw new InternalServerErrorException('Failed to update assignments');
+      }
     }
 
     return updated;
@@ -447,16 +474,21 @@ export class MessagesService {
   // ─── Reorder messages ──────────────────────────────────────────────────────
 
   async reorderMessages(userId: string, dto: ReorderMessagesDto) {
-    await Promise.all(
-      dto.order.map((item) =>
-        this.supabase
-          .getClient()
-          .from('messages')
-          .update({ display_order: item.displayOrder })
-          .eq('id', item.messageId)
-          .eq('user_id', userId),
-      ),
-    );
+    // One transactional statement scoped to the owner; the RPC rolls back and
+    // errors unless every requested id was updated, so a partial reorder can't
+    // commit while we report success.
+    const { error } = await this.supabase.getClient().rpc('reorder_messages', {
+      p_user_id: userId,
+      p_order: dto.order.map((item) => ({
+        id: item.messageId,
+        display_order: item.displayOrder,
+      })),
+    });
+
+    if (error) {
+      throw new InternalServerErrorException('Failed to reorder messages');
+    }
+
     return { message: 'Messages reordered' };
   }
 
@@ -508,16 +540,11 @@ export class MessagesService {
     const playbackId = playbackIds?.[0]?.id ?? null;
     const uploadId = data.upload_id as string;
 
-    const { data: message } = await this.supabase
-      .getClient()
-      .from('messages')
-      .select('id, user_id')
-      .eq('mux_upload_id', uploadId)
-      .single();
-
-    if (!message) return;
-
-    await this.supabase
+    // Transition to 'ready' only if not already ready, and gate all follow-up
+    // work on that one-time transition. A duplicate video.asset.ready delivery
+    // updates zero rows here, so analytics can't double-count and transcription
+    // isn't retriggered.
+    const { data: transitioned } = await this.supabase
       .getClient()
       .from('messages')
       .update({
@@ -527,16 +554,21 @@ export class MessagesService {
         duration_seconds: Math.round((data.duration as number) ?? 0),
         updated_at: new Date().toISOString(),
       })
-      .eq('id', message.id);
+      .eq('mux_upload_id', uploadId)
+      .neq('processing_status', 'ready')
+      .select('id, user_id')
+      .maybeSingle();
+
+    if (!transitioned) return; // unknown upload, or already-ready duplicate
 
     if (playbackId) {
-      this.transcribeVideo(message.id, playbackId).catch(() => null);
+      this.transcribeVideo(transitioned.id, playbackId).catch(() => null);
     }
 
     // Video is fully saved once Mux finishes processing the asset.
     await this.fireMessageSaved(
-      message.user_id,
-      message.id,
+      transitioned.user_id,
+      transitioned.id,
       'video',
       Math.round((data.duration as number) ?? 0),
     );
@@ -742,6 +774,19 @@ export class MessagesService {
           .length,
       });
     }
+  }
+
+  // Authorize the individual recipients referenced by an assignment list.
+  private async authorizeAssignmentRecipients(
+    userId: string,
+    assignments: AssignmentDto[],
+  ) {
+    await this.assertRecipientsOwned(
+      userId,
+      assignments
+        .filter((a) => a.scope === 'individual' && a.recipientId)
+        .map((a) => a.recipientId as string),
+    );
   }
 
   private async assertRecipientsOwned(userId: string, recipientIds: string[]) {

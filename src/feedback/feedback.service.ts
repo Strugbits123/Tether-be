@@ -44,6 +44,11 @@ export class FeedbackService {
   ) {}
 
   async getScreenshotUploadUrl(userId: string, dto: ScreenshotUploadUrlDto) {
+    // The DTO validates the *declared* file_type (image MIME allowlist) and
+    // file_size_bytes (<= 5MB). The actual uploaded bytes are enforced by the
+    // feedback-screenshots bucket's allowed_mime_types + file_size_limit
+    // (see db/storage-limits.sql), since a signed upload URL can't carry
+    // per-request constraints.
     const storagePath = `${userId}/${randomUUID()}-${sanitizeFileName(dto.file_name)}`;
 
     const { data, error } = await this.supabase
@@ -207,12 +212,17 @@ export class FeedbackService {
     const html = this.buildEmailHtml(dto, userName, userEmail, feedbackId, screenshotHtml);
 
     const resend = new Resend(apiKey);
-    await resend.emails.send({
+    // Resend returns { data, error } and does NOT throw on API failures, so the
+    // caller's .catch() would miss a failed send — check the error explicitly.
+    const { error } = await resend.emails.send({
       from: 'Tether Feedback <feedback@jointether.com>',
       to: ['support@jointether.com'],
       subject,
       html,
     });
+    if (error) {
+      throw new Error(`Resend send failed: ${error.message ?? 'unknown error'}`);
+    }
   }
 
   private buildSubject(dto: SubmitFeedbackDto, userName: string): string {

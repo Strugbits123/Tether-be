@@ -57,34 +57,26 @@ export class AnalyticsService {
    * which step finishes last.
    */
   async markOnboardingStep(userId: string, step: string): Promise<void> {
-    const client = this.supabase.getClient();
+    // The flag set + all-complete decision happen atomically in a row-locked DB
+    // function, so concurrent step completions can't clobber each other, miss
+    // activation, or both emit the completion event. Events fire only from the
+    // function's returned `just_completed` transition.
+    const { data, error } = await this.supabase
+      .getClient()
+      .rpc('complete_onboarding_step', { p_user_id: userId, p_step: step });
 
-    const { data: user } = await client
-      .from('users')
-      .select('onboarding, created_at')
-      .eq('id', userId)
-      .single();
-
-    if (!user) return;
-
-    const onboarding = ((user.onboarding as OnboardingState) ?? {}) as OnboardingState;
-    const wasComplete = typeof onboarding['completed_at'] === 'string';
-
-    onboarding[step] = true;
-
-    const nowComplete = ONBOARDING_STEPS.every((s) => onboarding[s] === true);
-    const justCompleted = nowComplete && !wasComplete;
-    if (justCompleted) {
-      onboarding['completed_at'] = new Date().toISOString();
+    if (error) {
+      this.logger.error(`complete_onboarding_step failed: ${error.message}`);
+      return;
     }
 
-    await client
-      .from('users')
-      .update({ onboarding, updated_at: new Date().toISOString() })
-      .eq('id', userId);
+    const result = (data as
+      | { just_completed: boolean; created_at: string | null }[]
+      | null)?.[0];
+    if (!result) return; // no such user
 
-    if (justCompleted) {
-      await this.fireOnboardingComplete(userId, user.created_at as string | null);
+    if (result.just_completed) {
+      await this.fireOnboardingComplete(userId, result.created_at ?? null);
     }
 
     // Keep person properties fresh so activation_status / has_* flags reflect
