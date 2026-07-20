@@ -1,0 +1,143 @@
+import {
+  ConflictException,
+  Injectable,
+  InternalServerErrorException,
+} from '@nestjs/common';
+import { SupabaseService } from '../shared/supabase/supabase.service.js';
+import { CreateGuardianData } from './dto/create-guardian.dto.js';
+
+const NON_TERMINAL_FILTER = '("revoked","declined")';
+const GUARDIAN_COLUMNS =
+  'id, account_id, guardian_user_id, name, email, relationship, status, invitation_token, invitation_sent_at, accepted_at, declined_at, revoked_at, priority_order, created_at';
+
+@Injectable()
+export class GuardiansService {
+  constructor(private readonly supabase: SupabaseService) {}
+
+  async findActiveByOwner(ownerId: string) {
+    const { data, error } = await this.supabase
+      .getClient()
+      .from('guardians')
+      .select(GUARDIAN_COLUMNS)
+      .eq('account_id', ownerId)
+      .not('status', 'in', NON_TERMINAL_FILTER)
+      .order('priority_order', { ascending: true });
+
+    if (error) {
+      throw new InternalServerErrorException('Failed to fetch guardians.');
+    }
+    return data ?? [];
+  }
+
+  async countActiveByOwner(ownerId: string): Promise<number> {
+    const { count, error } = await this.supabase
+      .getClient()
+      .from('guardians')
+      .select('id', { count: 'exact', head: true })
+      .eq('account_id', ownerId)
+      .not('status', 'in', NON_TERMINAL_FILTER);
+
+    if (error) {
+      throw new InternalServerErrorException('Failed to count guardians.');
+    }
+    return count ?? 0;
+  }
+
+  async nextPriorityOrder(ownerId: string): Promise<number> {
+    const existing = await this.findActiveByOwner(ownerId);
+    const taken = new Set(existing.map((g) => g.priority_order));
+    for (let order = 1; order <= 3; order++) {
+      if (!taken.has(order)) return order;
+    }
+    throw new ConflictException('Maximum of 3 Guardians already designated.');
+  }
+
+  async create(data: CreateGuardianData) {
+    const count = await this.countActiveByOwner(data.accountId);
+    if (count >= 3) {
+      throw new ConflictException('Maximum of 3 Guardians already designated.');
+    }
+
+    const { data: guardian, error } = await this.supabase
+      .getClient()
+      .from('guardians')
+      .insert({
+        account_id: data.accountId,
+        guardian_user_id: data.userId ?? null,
+        name: data.name,
+        email: data.email.toLowerCase(),
+        relationship: data.relationship,
+        priority_order: data.priorityOrder,
+        status: 'invited',
+        invitation_sent_at: new Date().toISOString(),
+      })
+      .select(GUARDIAN_COLUMNS)
+      .single();
+
+    if (error || !guardian) {
+      throw new InternalServerErrorException('Failed to designate Guardian.');
+    }
+    return guardian;
+  }
+
+  async findByEmail(ownerId: string, email: string) {
+    const { data, error } = await this.supabase
+      .getClient()
+      .from('guardians')
+      .select(GUARDIAN_COLUMNS)
+      .eq('account_id', ownerId)
+      .eq('email', email.toLowerCase())
+      .not('status', 'in', NON_TERMINAL_FILTER)
+      .maybeSingle();
+
+    if (error) {
+      throw new InternalServerErrorException('Failed to fetch guardian.');
+    }
+    return data;
+  }
+
+  async linkUser(guardianId: string, userId: string) {
+    const { error } = await this.supabase
+      .getClient()
+      .from('guardians')
+      .update({
+        guardian_user_id: userId,
+        status: 'accepted',
+        accepted_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', guardianId);
+
+    if (error) {
+      throw new InternalServerErrorException('Failed to link Guardian account.');
+    }
+  }
+
+  async revoke(guardianId: string) {
+    const { error } = await this.supabase
+      .getClient()
+      .from('guardians')
+      .update({
+        status: 'revoked',
+        revoked_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', guardianId);
+
+    if (error) {
+      throw new InternalServerErrorException('Failed to revoke Guardian.');
+    }
+  }
+
+  async markBounced(guardianId: string) {
+    await this.supabase
+      .getClient()
+      .from('guardians')
+      .update({
+        status: 'bounced',
+        invitation_bounced_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', guardianId);
+  }
+}
