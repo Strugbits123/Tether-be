@@ -7,6 +7,6 @@ import { PdfService } from './pdf.service.js';
 @Module({
   controllers: [MemoirController],
   providers: [MemoirService, TtsService, PdfService],
-  exports: [MemoirService],
+  exports: [MemoirService, PdfService],
 })
 export class MemoirModule {}

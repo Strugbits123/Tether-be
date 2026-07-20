@@ -40,6 +40,7 @@ import { InvitationsModule } from './invitations/invitations.module.js';
 import { GuardiansModule } from './guardians/guardians.module.js';
 import { AccessModule } from './access/access.module.js';
 import { ResendWebhookModule } from './webhooks/resend-webhook.module.js';
+import { RmPortalModule } from './rm-portal/rm-portal.module.js';
 
 @Module({
   imports: [
@@ -77,6 +78,7 @@ import { ResendWebhookModule } from './webhooks/resend-webhook.module.js';
     GuardiansModule,
     AccessModule,
     ResendWebhookModule,
+    RmPortalModule,
   ],
 })
 export class AppModule {}

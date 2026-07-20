@@ -89,6 +89,129 @@ export class EmailService {
     });
   }
 
+  async sendReleaseNotificationToOwner(params: {
+    to: string;
+    ownerName: string;
+    rmName: string;
+    reason: string;
+    deliveryDate: string;
+    cancelUrl: string;
+    planId: string;
+  }): Promise<string | null> {
+    const ownerName = escapeHtml(params.ownerName);
+    const rmName = escapeHtml(params.rmName);
+    const reason = escapeHtml(params.reason);
+    const deliveryDate = escapeHtml(params.deliveryDate);
+    const cancelUrl = escapeHtml(params.cancelUrl);
+    return this.send({
+      to: params.to,
+      subject: `⚠️ Release Plan ${params.planId} initiated for your Tether account`,
+      html: `<div style="font-family:sans-serif;max-width:600px">
+<p>Hi ${ownerName},</p>
+<p>Your Release Manager, ${rmName}, has initiated the release of your Tether content.</p>
+<p><strong>Reason:</strong> ${reason}<br/><strong>Delivery scheduled:</strong> ${deliveryDate}</p>
+<p>If this was done in error, you can cancel the release:</p>
+<p><a href="${cancelUrl}">Cancel Release</a></p>
+<p>This link expires on ${deliveryDate}. After that, content is delivered automatically and cannot be recalled.</p>
+<p>— The Tether Team</p>
+</div>`,
+    });
+  }
+
+  async sendReleaseNotificationToRecipient(params: {
+    to: string;
+    recipientName: string;
+    ownerName: string;
+    deliveryDate: string;
+  }): Promise<string | null> {
+    const recipientName = escapeHtml(params.recipientName);
+    const ownerName = escapeHtml(params.ownerName);
+    const deliveryDate = escapeHtml(params.deliveryDate);
+    return this.send({
+      to: params.to,
+      subject: `${params.ownerName} has left something for you`,
+      html: `<div style="font-family:sans-serif;max-width:600px">
+<p>Hi ${recipientName},</p>
+<p>${ownerName} prepared messages, photos, and memories for you through Tether — a digital legacy platform.</p>
+<p>Their content is being securely prepared for delivery. You will receive a link to access your personal portal on ${deliveryDate}.</p>
+<p>No action is needed right now.</p>
+<p>— The Tether Team</p>
+</div>`,
+    });
+  }
+
+  async sendDeliveryEmail(params: {
+    to: string;
+    recipientName: string;
+    ownerName: string;
+    portalUrl: string;
+  }): Promise<string | null> {
+    const recipientName = escapeHtml(params.recipientName);
+    const ownerName = escapeHtml(params.ownerName);
+    const portalUrl = escapeHtml(params.portalUrl);
+    return this.send({
+      to: params.to,
+      subject: `${params.ownerName}'s legacy is ready for you`,
+      html: `<div style="font-family:sans-serif;max-width:600px">
+<p>Hi ${recipientName},</p>
+<p>${ownerName} prepared personal content just for you. It's now ready to view in your private Tether portal.</p>
+<p><a href="${portalUrl}">Access Your Portal</a></p>
+<p>This portal contains messages, photos, documents, and memoir chapters that ${ownerName} chose specifically for you.</p>
+<p>— The Tether Team</p>
+</div>`,
+    });
+  }
+
+  async sendGuardianEscalation(params: {
+    to: string;
+    guardianName: string;
+    ownerName: string;
+    rmName: string;
+    explanation: string;
+    acceptUrl: string;
+  }): Promise<string | null> {
+    const guardianName = escapeHtml(params.guardianName);
+    const ownerName = escapeHtml(params.ownerName);
+    const rmName = escapeHtml(params.rmName);
+    const explanation = escapeHtml(params.explanation);
+    const acceptUrl = escapeHtml(params.acceptUrl);
+    return this.send({
+      to: params.to,
+      subject: `Action needed: ${params.ownerName}'s Release Manager needs your help`,
+      html: `<div style="font-family:sans-serif;max-width:600px">
+<p>Hi ${guardianName},</p>
+<p>${rmName}, the Release Manager for ${ownerName}'s Tether account, has requested that you step in to complete the release process.</p>
+<p>Their message: "${explanation}"</p>
+<p>As ${ownerName}'s Guardian, you can accept this responsibility and manage the content delivery.</p>
+<p><a href="${acceptUrl}">Accept &amp; Start Release</a></p>
+<p>If you don't respond within 3 days, the next Guardian will be contacted.</p>
+<p>— The Tether Team</p>
+</div>`,
+    });
+  }
+
+  async sendReleaseCancelledNotification(params: {
+    to: string;
+    name: string;
+    ownerName: string;
+    reason: string;
+  }): Promise<string | null> {
+    const name = escapeHtml(params.name);
+    const ownerName = escapeHtml(params.ownerName);
+    const reason = escapeHtml(params.reason);
+    return this.send({
+      to: params.to,
+      subject: `${params.ownerName}'s Release Plan was cancelled`,
+      html: `<div style="font-family:sans-serif;max-width:600px">
+<p>Hi ${name},</p>
+<p>The Release Plan for ${ownerName}'s Tether account has been cancelled.</p>
+<p><strong>Reason:</strong> ${reason}</p>
+<p>No content will be delivered at this time.</p>
+<p>— The Tether Team</p>
+</div>`,
+    });
+  }
+
   // Returns the Resend message id (for notification_log correlation), or null
   // if Resend isn't configured / the caller should not expect a webhook event.
   private async send(params: {
