@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import {
   BadRequestException,
   ConflictException,
@@ -81,6 +82,66 @@ export class AccessService {
       .eq('email', email.toLowerCase())
       .maybeSingle();
     return data?.id ?? null;
+  }
+
+  // Insert an account_memberships row, or reactivate a matching one if it
+  // already exists (e.g. a previously revoked invite to the same email for
+  // the same owner+role) — a plain insert would violate the unique_invite
+  // constraint and fail silently if the caller doesn't check the error.
+  // Always mints a fresh invitation_token so a stale/leaked link from a prior
+  // invite can't still work. Returns the row's id + invitation_token.
+  private async upsertMembership(params: {
+    userId: string | null;
+    ownerId: string;
+    role: string;
+    inviteEmail: string;
+    inviteName: string;
+    relationship: string;
+    note?: string | null;
+  }) {
+    const { data: existing } = await this.supabase
+      .getClient()
+      .from('account_memberships')
+      .select('id')
+      .eq('account_owner_id', params.ownerId)
+      .eq('role', params.role)
+      .eq('invite_email', params.inviteEmail)
+      .maybeSingle();
+
+    const row = {
+      user_id: params.userId,
+      account_owner_id: params.ownerId,
+      role: params.role,
+      status: 'pending',
+      invite_email: params.inviteEmail,
+      invite_name: params.inviteName,
+      relationship: params.relationship,
+      note: params.note ?? null,
+      invitation_token: randomUUID(),
+      invitation_sent_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    const { data, error } = existing
+      ? await this.supabase
+          .getClient()
+          .from('account_memberships')
+          .update(row)
+          .eq('id', existing.id)
+          .select('id, invitation_token')
+          .single()
+      : await this.supabase
+          .getClient()
+          .from('account_memberships')
+          .insert(row)
+          .select('id, invitation_token')
+          .single();
+
+    if (error || !data) {
+      throw new InternalServerErrorException('Failed to create invitation.');
+    }
+
+    return data;
   }
 
   private async getActiveReleaseManager(ownerId: string) {
@@ -364,15 +425,13 @@ export class AccessService {
       throw new InternalServerErrorException('Failed to add recipient.');
     }
 
-    await this.supabase.getClient().from('account_memberships').insert({
-      user_id: userId,
-      account_owner_id: ownerId,
+    await this.upsertMembership({
+      userId,
+      ownerId,
       role: 'recipient',
-      status: 'pending',
-      invite_email: email,
-      invite_name: name,
+      inviteEmail: email,
+      inviteName: name,
       relationship: dto.relationship,
-      invitation_sent_at: new Date().toISOString(),
     });
 
     let guardianResult: any = null;
@@ -571,15 +630,13 @@ export class AccessService {
       userId,
     });
 
-    await this.supabase.getClient().from('account_memberships').insert({
-      user_id: userId,
-      account_owner_id: ownerId,
+    await this.upsertMembership({
+      userId,
+      ownerId,
       role: 'guardian',
-      status: 'pending',
-      invite_email: recipient.email.toLowerCase(),
-      invite_name: recipient.name,
+      inviteEmail: recipient.email.toLowerCase(),
+      inviteName: recipient.name,
       relationship: recipient.relationship,
-      invitation_sent_at: new Date().toISOString(),
     });
 
     const rm = await this.getActiveReleaseManager(ownerId);
@@ -701,24 +758,17 @@ export class AccessService {
       throw new InternalServerErrorException('Failed to designate Release Manager.');
     }
 
-    const { data: membership } = await this.supabase
-      .getClient()
-      .from('account_memberships')
-      .insert({
-        user_id: userId,
-        account_owner_id: ownerId,
-        role: 'release_manager',
-        status: 'pending',
-        invite_email: email,
-        invite_name: dto.name,
-        relationship: dto.relationship,
-        note: dto.note ?? null,
-        invitation_sent_at: new Date().toISOString(),
-      })
-      .select('invitation_token')
-      .single();
+    const membership = await this.upsertMembership({
+      userId,
+      ownerId,
+      role: 'release_manager',
+      inviteEmail: email,
+      inviteName: dto.name,
+      relationship: dto.relationship,
+      note: dto.note,
+    });
 
-    const acceptUrl = `${this.frontendUrl}/invitations/accept/${membership?.invitation_token ?? ''}`;
+    const acceptUrl = `${this.frontendUrl}/invitations/accept/${membership.invitation_token}`;
     const messageId = await this.emailService
       .sendReleaseManagerInvitation({
         to: email,
