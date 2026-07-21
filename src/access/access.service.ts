@@ -416,9 +416,9 @@ export class AccessService {
         email,
         phone: dto.phone ?? null,
         relationship: dto.relationship,
-        note: null,
+        note: dto.note ?? null,
       })
-      .select('id, name, email, phone, relationship, invitation_status, created_at')
+      .select('id, name, email, phone, relationship, note, invitation_status, created_at')
       .single();
 
     if (error || !recipient) {

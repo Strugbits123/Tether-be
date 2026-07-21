@@ -35,4 +35,9 @@ export class AddRecipientDto {
   @IsOptional()
   @IsBoolean()
   designate_as_guardian?: boolean;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  note?: string;
 }
