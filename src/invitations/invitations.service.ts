@@ -409,12 +409,25 @@ export class InvitationsService {
     }
 
     if (!userId) {
+      // The invite email might already belong to a Tether user (e.g. someone
+      // invited as RM for one account who already has their own account, or a
+      // repeat invite to an email that signed up outside this flow). Sending
+      // them to signup would always 409 — send them to sign in instead, with
+      // the token preserved so acceptance still finalizes after login.
+      const existingUserId = membership.invite_email
+        ? await this.findExistingUserId(membership.invite_email)
+        : null;
+
+      const redirectUrl = existingUserId
+        ? `${this.frontendUrl}/signin?invite_token=${token}`
+        : `${this.frontendUrl}/auth/signup?invite_token=${token}&role=${membership.role}&name=${encodeURIComponent(
+            membership.invite_name ?? '',
+          )}&email=${encodeURIComponent(membership.invite_email ?? '')}`;
+
       return {
         alreadyAccepted: false,
         loggedIn: false,
-        redirectUrl: `${this.frontendUrl}/auth/signup?invite_token=${token}&role=${membership.role}&name=${encodeURIComponent(
-          membership.invite_name ?? '',
-        )}`,
+        redirectUrl,
       };
     }
 
