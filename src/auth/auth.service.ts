@@ -88,20 +88,27 @@ export class AuthService {
       // Every account owner needs a self-membership row so GET /auth/memberships
       // resolves without a separate onboarding step. Best-effort: a missing row
       // here is recoverable via the backfill query, never worth failing signup.
-      await this.supabase
-        .getClient()
-        .from('account_memberships')
-        .insert({
-          user_id: data.user.id,
-          account_owner_id: data.user.id,
-          role: 'owner',
-          status: 'active',
-        })
-        .then(({ error }) => {
-          if (error) {
-            this.logger.error('Failed to create owner self-membership', error);
-          }
-        });
+      //
+      // Skipped when signing up via an invitation: that person is joining
+      // purely as a Release Manager/Guardian/Recipient and shouldn't be handed
+      // their own owner account (and the owner onboarding wizard) unless they
+      // explicitly choose to via "Create my Tether" later.
+      if (!dto.invite_token) {
+        await this.supabase
+          .getClient()
+          .from('account_memberships')
+          .insert({
+            user_id: data.user.id,
+            account_owner_id: data.user.id,
+            role: 'owner',
+            status: 'active',
+          })
+          .then(({ error }) => {
+            if (error) {
+              this.logger.error('Failed to create owner self-membership', error);
+            }
+          });
+      }
 
       this.posthog.capture(data.user.id, 'account_created', {
         signup_method: 'email',
