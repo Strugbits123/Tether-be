@@ -452,8 +452,17 @@ export class InvitationsService {
       alreadyAccepted: false,
       loggedIn: true,
       role: membership.role,
-      redirectUrl: `${this.frontendUrl}/portal/${membership.role}`,
+      redirectUrl: `${this.frontendUrl}${this.portalPathForRole(membership.role)}`,
     };
+  }
+
+  // Maps a membership role to its real frontend route. There is no generic
+  // `/portal/{role}` route — only the release manager portal exists today
+  // (under `/rm/*`); guardian/recipient fall back to the account picker.
+  private portalPathForRole(role: string): string {
+    if (role === 'owner') return '/dashboard';
+    if (role === 'release_manager') return '/rm/overview';
+    return '/select-account';
   }
 
   // POST /invitations/resend/:id

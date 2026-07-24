@@ -254,7 +254,6 @@ export class EmailService {
 <p><strong>What this means</strong></p>
 <p>As ${ownerName}'s Release Manager, you will:</p>
 <ul>
-<li>Access and review all content ${ownerName} has prepared for their loved ones — messages, photos, documents, and memoir chapters</li>
 <li>Initiate the release process when the time comes</li>
 <li>Manage the delivery of content to ${ownerName}'s designated recipients</li>
 <li>Ensure everything reaches the right people securely</li>

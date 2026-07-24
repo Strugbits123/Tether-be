@@ -1,4 +1,4 @@
-import { Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
+import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
 import { timeAgo } from './rm-portal.util.js';
 
@@ -14,10 +14,12 @@ interface MergedNotification {
 
 @Injectable()
 export class RmNotificationsService {
+  private readonly logger = new Logger(RmNotificationsService.name);
+
   constructor(private readonly supabase: SupabaseService) {}
 
   // GET /rm/notifications
-  async listNotifications(userId: string, category?: string) {
+  async listNotifications(userId: string) {
     const now = new Date().toISOString();
 
     const { data: announcements, error: announcementsError } = await this.supabase
@@ -29,33 +31,34 @@ export class RmNotificationsService {
       .lte('start_date', now);
 
     if (announcementsError) {
+      this.logger.error(`Failed to fetch announcements: ${announcementsError.message}`, announcementsError);
       throw new InternalServerErrorException('Failed to fetch announcements.');
     }
 
-    const { data: dismissals } = await this.supabase
+    const { data: reads, error: readsError } = await this.supabase
       .getClient()
-      .from('announcement_dismissals')
-      .select('announcement_id, dismissed_at')
+      .from('rm_notification_reads')
+      .select('notification_id, is_read')
       .eq('user_id', userId);
 
-    const dismissedIds = new Set((dismissals ?? []).map((d) => d.announcement_id));
-    const dismissalMap = new Map((dismissals ?? []).map((d) => [d.announcement_id, d.dismissed_at]));
+    if (readsError) {
+      this.logger.error(`Failed to fetch notification read state: ${readsError.message}`, readsError);
+      throw new InternalServerErrorException('Failed to fetch notification read state.');
+    }
 
-    const activeAnnouncements = (announcements ?? []).filter(
-      (a) => !a.end_date || a.end_date >= now,
-    );
+    const readMap = new Map((reads ?? []).map((r) => [r.notification_id, r.is_read]));
 
-    const merged: MergedNotification[] = activeAnnouncements
-      .filter((a) => !dismissedIds.has(a.id))
-      .map((a) => ({
-        id: a.id,
-        source: 'system' as const,
-        category: a.category ?? null,
-        title: 'Tether',
-        message: a.message,
-        is_read: dismissalMap.has(a.id),
-        created_at: a.start_date,
-      }));
+    const activeAnnouncements = (announcements ?? []).filter((a) => !a.end_date || a.end_date >= now);
+
+    const merged: MergedNotification[] = activeAnnouncements.map((a) => ({
+      id: a.id,
+      source: 'system' as const,
+      category: a.category ?? null,
+      title: 'Tether',
+      message: a.message,
+      is_read: readMap.get(a.id) ?? false,
+      created_at: a.start_date,
+    }));
 
     const { data: activityRows } = await this.supabase
       .getClient()
@@ -73,57 +76,45 @@ export class RmNotificationsService {
         category: null,
         title: 'Tether',
         message: a.event_label,
-        is_read: false,
+        is_read: readMap.get(a.id) ?? false,
         created_at: a.created_at,
       });
     }
 
     merged.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
-    const filtered =
-      category && category !== 'all'
-        ? merged.filter((n) => n.category === category)
-        : merged;
-
     return {
-      notifications: filtered.map((n) => ({ ...n, time_ago: timeAgo(n.created_at) })),
+      notifications: merged.map((n) => ({ ...n, time_ago: timeAgo(n.created_at) })),
       unread_count: merged.filter((n) => !n.is_read).length,
-      total: filtered.length,
+      total: merged.length,
     };
   }
 
-  // PATCH /rm/notifications/:id/read
-  async markRead(userId: string, announcementId: string) {
+  private async setReadState(userId: string, notificationId: string, isRead: boolean) {
     const { error } = await this.supabase
       .getClient()
-      .from('announcement_dismissals')
+      .from('rm_notification_reads')
       .upsert(
-        { user_id: userId, announcement_id: announcementId, dismissed_at: new Date().toISOString() },
-        { onConflict: 'user_id,announcement_id' },
+        { user_id: userId, notification_id: notificationId, is_read: isRead, updated_at: new Date().toISOString() },
+        { onConflict: 'user_id,notification_id' },
       );
 
     if (error) {
-      throw new InternalServerErrorException('Failed to mark notification as read.');
+      this.logger.error(`Failed to update notification read state: ${error.message}`, error);
+      throw new InternalServerErrorException('Failed to update notification.');
     }
 
-    return { id: announcementId, is_read: true };
+    return { id: notificationId, is_read: isRead };
   }
 
-  // DELETE /rm/notifications/:id
-  async dismiss(userId: string, announcementId: string) {
-    const { error } = await this.supabase
-      .getClient()
-      .from('announcement_dismissals')
-      .upsert(
-        { user_id: userId, announcement_id: announcementId, dismissed_at: new Date().toISOString() },
-        { onConflict: 'user_id,announcement_id' },
-      );
+  // PATCH /rm/notifications/:id/read
+  async markRead(userId: string, notificationId: string) {
+    return this.setReadState(userId, notificationId, true);
+  }
 
-    if (error) {
-      throw new NotFoundException('Notification not found.');
-    }
-
-    return { message: 'Notification dismissed' };
+  // PATCH /rm/notifications/:id/unread
+  async markUnread(userId: string, notificationId: string) {
+    return this.setReadState(userId, notificationId, false);
   }
 
   // GET /rm/notifications/unread-count

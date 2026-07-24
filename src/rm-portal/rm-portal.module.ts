@@ -9,6 +9,8 @@ import { ReleasePlanService } from './release-plan.service.js';
 import { ReleaseCancelController } from './release-cancel.controller.js';
 import { RmNotificationsController } from './rm-notifications.controller.js';
 import { RmNotificationsService } from './rm-notifications.service.js';
+import { RmDownloadsController } from './rm-downloads.controller.js';
+import { RmDownloadsService } from './rm-downloads.service.js';
 
 @Module({
   imports: [AuthModule, GuardiansModule, MemoirModule],
@@ -17,8 +19,9 @@ import { RmNotificationsService } from './rm-notifications.service.js';
     ReleasePlanController,
     ReleaseCancelController,
     RmNotificationsController,
+    RmDownloadsController,
   ],
-  providers: [RmPortalService, ReleasePlanService, RmNotificationsService],
+  providers: [RmPortalService, ReleasePlanService, RmNotificationsService, RmDownloadsService],
   exports: [ReleasePlanService],
 })
 export class RmPortalModule {}

@@ -713,6 +713,21 @@ export class AccessService {
     if (!owner) throw new NotFoundException('Account owner not found');
 
     const email = dto.email.toLowerCase();
+
+    const { data: recipientConflict } = await this.supabase
+      .getClient()
+      .from('recipients')
+      .select('id')
+      .eq('user_id', ownerId)
+      .eq('email', email)
+      .maybeSingle();
+
+    if (recipientConflict) {
+      throw new ConflictException(
+        'This person is already a recipient on your account. A Release Manager cannot also be a recipient.',
+      );
+    }
+
     const existingRm = await this.getActiveReleaseManager(ownerId);
     const replaced = !!existingRm;
 
@@ -835,7 +850,24 @@ export class AccessService {
     }
 
     const userId = await this.findExistingUserId(rm.email);
-    const acceptUrl = `${this.frontendUrl}/invitations/accept`;
+
+    const { data: membership } = await this.supabase
+      .getClient()
+      .from('account_memberships')
+      .select('invitation_token')
+      .eq('account_owner_id', ownerId)
+      .eq('role', 'release_manager')
+      .eq('invite_email', rm.email.toLowerCase())
+      .not('status', 'in', '("revoked","declined")')
+      .maybeSingle();
+
+    if (!membership?.invitation_token) {
+      throw new InternalServerErrorException(
+        'No pending invitation found for this Release Manager.',
+      );
+    }
+
+    const acceptUrl = `${this.frontendUrl}/invitations/accept/${membership.invitation_token}`;
     const messageId = await this.emailService
       .sendReleaseManagerReminder({
         to: rm.email,

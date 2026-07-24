@@ -47,29 +47,67 @@ export class MembershipsService {
 
     const rows = data ?? [];
     const ownerIds = [...new Set(rows.map((r) => r.account_owner_id))];
-    const ownerMap = await this.fetchOwners(ownerIds);
+    const [ownerMap, statsMap] = await Promise.all([
+      this.fetchOwners(ownerIds),
+      this.fetchOwnerStats(ownerIds),
+    ]);
 
+    // Matches the frontend's Membership contract (src/lib/api/memberships.ts)
+    // exactly — portal/owner_name/stats/release_active, not role/account_owner.
     const memberships = rows.map((row) => {
       const owner = ownerMap.get(row.account_owner_id);
+      const stats = statsMap.get(row.account_owner_id) ?? {
+        messages: 0,
+        documents: 0,
+        recipients: 0,
+        releaseActive: false,
+      };
 
       return {
         id: row.id,
-        role: row.role,
-        status: row.status,
-        account_owner: owner
-          ? {
-              id: owner.id,
-              name: owner.full_name,
-              email: owner.email,
-              avatar_url: owner.avatar_url ?? null,
-            }
-          : null,
+        portal: row.role,
         is_self: row.account_owner_id === userId,
-        ...(row.relationship ? { relationship: row.relationship } : {}),
+        owner_name: owner?.full_name ?? null,
+        relationship: row.relationship ?? null,
+        release_active: stats.releaseActive,
+        stats: {
+          messages: stats.messages,
+          documents: stats.documents,
+          recipients: stats.recipients,
+        },
       };
     });
 
     return { memberships };
+  }
+
+  private async fetchOwnerStats(ownerIds: string[]) {
+    const client = this.supabase.getClient();
+    const map = new Map<
+      string,
+      { messages: number; documents: number; recipients: number; releaseActive: boolean }
+    >();
+
+    await Promise.all(
+      ownerIds.map(async (ownerId) => {
+        const [{ count: messages }, { count: documents }, { count: recipients }, { data: activePlan }] =
+          await Promise.all([
+            client.from('messages').select('id', { count: 'exact', head: true }).eq('user_id', ownerId),
+            client.from('documents').select('id', { count: 'exact', head: true }).eq('user_id', ownerId),
+            client.from('recipients').select('id', { count: 'exact', head: true }).eq('user_id', ownerId),
+            client.from('release_plans').select('id').eq('user_id', ownerId).eq('status', 'active').maybeSingle(),
+          ]);
+
+        map.set(ownerId, {
+          messages: messages ?? 0,
+          documents: documents ?? 0,
+          recipients: recipients ?? 0,
+          releaseActive: !!activePlan,
+        });
+      }),
+    );
+
+    return map;
   }
 
   private async fetchOwners(ownerIds: string[]) {
