@@ -35,6 +35,12 @@ import { ContentModule } from './content/content.module.js';
 import { MemoirModule } from './memoir/memoir.module.js';
 import { FeedbackModule } from './feedback/feedback.module.js';
 import { AnalyticsModule } from './analytics/analytics.module.js';
+import { MembershipsModule } from './memberships/memberships.module.js';
+import { InvitationsModule } from './invitations/invitations.module.js';
+import { GuardiansModule } from './guardians/guardians.module.js';
+import { AccessModule } from './access/access.module.js';
+import { ResendWebhookModule } from './webhooks/resend-webhook.module.js';
+import { RmPortalModule } from './rm-portal/rm-portal.module.js';
 
 @Module({
   imports: [
@@ -67,6 +73,12 @@ import { AnalyticsModule } from './analytics/analytics.module.js';
     MemoirModule,
     FeedbackModule,
     AnalyticsModule,
+    MembershipsModule,
+    InvitationsModule,
+    GuardiansModule,
+    AccessModule,
+    ResendWebhookModule,
+    RmPortalModule,
   ],
 })
 export class AppModule {}

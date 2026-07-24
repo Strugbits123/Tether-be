@@ -75,6 +75,30 @@ export class PdfService implements OnModuleDestroy {
     }
   }
 
+  // Generic HTML->PDF rendering for reports outside the memoir shape (e.g.
+  // the RM portal's release activity report).
+  async generatePdfFromHtml(html: string): Promise<Buffer> {
+    const browser = await this.getBrowser();
+    const page = await browser.newPage();
+    try {
+      page.setDefaultTimeout(RENDER_TIMEOUT_MS);
+      await page.setContent(html, {
+        waitUntil: 'load',
+        timeout: RENDER_TIMEOUT_MS,
+      });
+
+      const pdfBuffer = await page.pdf({
+        format: 'A4',
+        margin: { top: '2cm', bottom: '2cm', left: '2.5cm', right: '2.5cm' },
+        printBackground: true,
+      });
+
+      return Buffer.from(pdfBuffer);
+    } finally {
+      await page.close().catch(() => undefined);
+    }
+  }
+
   async generatePdf(memoir: MemoirData): Promise<{ buffer: Buffer; filename: string }> {
     const html = this.buildHtml(memoir);
     const browser = await this.getBrowser();

@@ -4,6 +4,7 @@ import {
   ConflictException,
   UnauthorizedException,
   InternalServerErrorException,
+  Logger,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
@@ -17,6 +18,8 @@ import { UpdatePasswordDto } from './dto/update-password.dto.js';
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private readonly supabase: SupabaseService,
     private readonly config: ConfigService,
@@ -82,6 +85,24 @@ export class AuthService {
     }
 
     if (data.user?.id) {
+      // Every account owner needs a self-membership row so GET /auth/memberships
+      // resolves without a separate onboarding step. Best-effort: a missing row
+      // here is recoverable via the backfill query, never worth failing signup.
+      await this.supabase
+        .getClient()
+        .from('account_memberships')
+        .insert({
+          user_id: data.user.id,
+          account_owner_id: data.user.id,
+          role: 'owner',
+          status: 'active',
+        })
+        .then(({ error }) => {
+          if (error) {
+            this.logger.error('Failed to create owner self-membership', error);
+          }
+        });
+
       this.posthog.capture(data.user.id, 'account_created', {
         signup_method: 'email',
         provider: 'email',
