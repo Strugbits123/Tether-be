@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   InternalServerErrorException,
   Logger,
@@ -24,7 +25,7 @@ import { RmRelationshipType } from '../release-managers/dto/create-release-manag
 function splitName(name: string): { firstName: string; lastName: string } {
   const trimmed = name.trim();
   const idx = trimmed.indexOf(' ');
-  if (idx === -1) return { firstName: trimmed, lastName: trimmed };
+  if (idx === -1) return { firstName: trimmed, lastName: '' };
   return { firstName: trimmed.slice(0, idx), lastName: trimmed.slice(idx + 1) };
 }
 
@@ -398,6 +399,24 @@ export class InvitationsService {
       };
     }
 
+    // A logged-in user must be the actual invitee — otherwise anyone who
+    // stumbles on an invite link while signed in could claim a stranger's
+    // pending Release Manager/Guardian/Recipient membership.
+    if (membership.invite_email) {
+      const { data: authedUser } = await this.supabase
+        .getClient()
+        .from('users')
+        .select('email')
+        .eq('id', userId)
+        .maybeSingle();
+
+      if (!authedUser || authedUser.email.toLowerCase() !== membership.invite_email.toLowerCase()) {
+        throw new ForbiddenException(
+          'This invitation was sent to a different email address than the one you are signed in with.',
+        );
+      }
+    }
+
     const { error: updateError } = await this.supabase
       .getClient()
       .from('account_memberships')
@@ -488,34 +507,48 @@ export class InvitationsService {
 
     const acceptUrl = `${this.frontendUrl}/invitations/accept/${membership.invitation_token}`;
 
+    // Best-effort, like every other invitation email in this service — a
+    // transient Resend error shouldn't fail the whole resend request.
     if (membership.role === 'release_manager') {
-      await this.emailService.sendReleaseManagerInvitation({
-        to: membership.invite_email,
-        rmName: membership.invite_name,
-        ownerName: owner.full_name,
-        ownerEmail: owner.email,
-        acceptUrl,
-      });
+      await this.emailService
+        .sendReleaseManagerInvitation({
+          to: membership.invite_email,
+          rmName: membership.invite_name,
+          ownerName: owner.full_name,
+          ownerEmail: owner.email,
+          acceptUrl,
+        })
+        .catch((err) => {
+          this.logger.error('Failed to resend RM invitation email', err);
+        });
     } else if (membership.role === 'guardian') {
       const guardian = await this.guardiansService.findByEmail(
         ownerId,
         membership.invite_email,
       );
-      await this.emailService.sendGuardianInvitation({
-        to: membership.invite_email,
-        guardianName: membership.invite_name,
-        ownerName: owner.full_name,
-        rmName: null,
-        order: guardian?.priority_order ?? 1,
-        acceptUrl,
-      });
+      await this.emailService
+        .sendGuardianInvitation({
+          to: membership.invite_email,
+          guardianName: membership.invite_name,
+          ownerName: owner.full_name,
+          rmName: null,
+          order: guardian?.priority_order ?? 1,
+          acceptUrl,
+        })
+        .catch((err) => {
+          this.logger.error('Failed to resend guardian invitation email', err);
+        });
     } else {
-      await this.emailService.sendRecipientNotification({
-        to: membership.invite_email,
-        recipientName: membership.invite_name,
-        ownerName: owner.full_name,
-        signupUrl: `${this.frontendUrl}/signup?ref=recipient`,
-      });
+      await this.emailService
+        .sendRecipientNotification({
+          to: membership.invite_email,
+          recipientName: membership.invite_name,
+          ownerName: owner.full_name,
+          signupUrl: `${this.frontendUrl}/signup?ref=recipient`,
+        })
+        .catch((err) => {
+          this.logger.error('Failed to resend recipient notification email', err);
+        });
     }
 
     await this.supabase
@@ -552,6 +585,26 @@ export class InvitationsService {
           this.logger.error('Failed to revoke guardians row', err);
         });
       }
+    } else if (data.role === 'release_manager' && data.invite_email) {
+      const { error: rmError } = await this.supabase
+        .getClient()
+        .from('release_managers')
+        .update({ status: 'revoked', updated_at: new Date().toISOString() })
+        .eq('user_id', ownerId)
+        .eq('email', data.invite_email)
+        .not('status', 'in', '("revoked","declined")');
+      if (rmError) this.logger.error('Failed to revoke release_managers row', rmError);
+    } else if (data.role === 'recipient' && data.invite_email) {
+      // The recipients table has no soft-revoke status in active use — mirror
+      // the guardian-invite rollback pattern by removing the synced row
+      // rather than leaving it referencing a revoked invitation.
+      const { error: recipientError } = await this.supabase
+        .getClient()
+        .from('recipients')
+        .delete()
+        .eq('user_id', ownerId)
+        .eq('email', data.invite_email.toLowerCase());
+      if (recipientError) this.logger.error('Failed to remove recipients row', recipientError);
     }
 
     return { id: membershipId, revoked: true };

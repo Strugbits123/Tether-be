@@ -6,7 +6,7 @@ import {
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
 import { CreateGuardianData } from './dto/create-guardian.dto.js';
 
-const NON_TERMINAL_FILTER = '("revoked","declined")';
+const NON_TERMINAL_FILTER = '("revoked","declined","bounced")';
 const GUARDIAN_COLUMNS =
   'id, account_id, guardian_user_id, name, email, relationship, status, invitation_token, invitation_sent_at, accepted_at, declined_at, revoked_at, priority_order, created_at';
 

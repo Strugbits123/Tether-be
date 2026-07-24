@@ -404,6 +404,19 @@ export class AccessService {
       );
     }
 
+    // Validate the guardian designation up front — before persisting anything
+    // — so a rejected request never leaves an orphaned recipient/membership
+    // with no matching guardian record.
+    if (dto.designate_as_guardian) {
+      if (dto.legal_acknowledged !== true) {
+        throw new BadRequestException('legal_acknowledged must be true');
+      }
+      const guardianCount = await this.guardiansService.countActiveByOwner(ownerId);
+      if (guardianCount >= 3) {
+        throw new ConflictException('Maximum of 3 Guardians already designated.');
+      }
+    }
+
     const name = `${dto.first_name.trim()} ${dto.last_name.trim()}`;
     const userId = await this.findExistingUserId(email);
 
@@ -487,6 +500,21 @@ export class AccessService {
 
     const newEmail = dto.email?.toLowerCase();
     if (newEmail && newEmail !== recipient.email.toLowerCase()) {
+      const { data: conflicting } = await this.supabase
+        .getClient()
+        .from('recipients')
+        .select('id')
+        .eq('user_id', ownerId)
+        .eq('email', newEmail)
+        .neq('id', recipientId)
+        .maybeSingle();
+
+      if (conflicting) {
+        throw new ConflictException(
+          'A recipient with this email address already exists on your account.',
+        );
+      }
+
       updates.email = newEmail;
 
       await this.supabase

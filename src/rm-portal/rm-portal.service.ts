@@ -1,6 +1,7 @@
 import {
   Injectable,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
@@ -27,6 +28,8 @@ const RM_VISIBLE_EVENT_TYPES = new Set([
 
 @Injectable()
 export class RmPortalService {
+  private readonly logger = new Logger(RmPortalService.name);
+
   constructor(
     private readonly supabase: SupabaseService,
     private readonly notificationLog: NotificationLogService,
@@ -80,8 +83,9 @@ export class RmPortalService {
         .from('activity_log')
         .select('id, event_type, event_label, created_at')
         .eq('user_id', accountOwnerId)
+        .in('event_type', [...RM_VISIBLE_EVENT_TYPES])
         .order('created_at', { ascending: false })
-        .limit(30),
+        .limit(10),
       supabase
         .from('release_plans')
         .select('id')
@@ -94,8 +98,6 @@ export class RmPortalService {
     const audioMessages = (messages ?? []).filter((m) => m.type === 'audio').length;
 
     const recentActivity = (activityRows ?? [])
-      .filter((a) => RM_VISIBLE_EVENT_TYPES.has(a.event_type))
-      .slice(0, 10)
       .map((a) => ({
         id: a.id,
         event_type: a.event_type,
@@ -204,11 +206,18 @@ export class RmPortalService {
         };
       }
 
+      // Correlate by the identifiers stored in metadata at send-time, not by
+      // email — a shared/rename email could otherwise surface another
+      // account's or another release plan's notification history.
       const { data: logRows } = await this.supabase
         .getClient()
         .from('notification_log')
-        .select('id, email_type, status, sent_at, delivered_at, bounced_at, opened_at')
-        .eq('recipient_email', recipient.email.toLowerCase())
+        .select('id, email_type, status, sent_at, delivered_at, bounced_at, opened_at, metadata')
+        .contains('metadata', {
+          account_owner_id: accountOwnerId,
+          release_plan_id: activePlan.id,
+          recipient_id: recipientId,
+        })
         .order('sent_at', { ascending: false });
       deliveryEvents = logRows ?? [];
     }
@@ -266,14 +275,20 @@ export class RmPortalService {
     const frontendUrl = process.env.FRONTEND_URL ?? 'https://app.jointether.com';
     const portalUrl = `${frontendUrl}/portal/${activePlan.id}/${recipientId}`;
 
-    const messageId = await this.emailService
-      .sendDeliveryEmail({
+    let messageId: string | null;
+    try {
+      messageId = await this.emailService.sendDeliveryEmail({
         to: newEmail,
         recipientName: recipient?.name ?? 'there',
         ownerName: owner?.full_name ?? 'Your loved one',
         portalUrl,
-      })
-      .catch(() => null);
+      });
+    } catch (err) {
+      this.logger.error(`Failed to resend delivery email for recipient ${recipientId}`, err);
+      throw new InternalServerErrorException(
+        'Failed to send the delivery email. Please try again.',
+      );
+    }
 
     await this.notificationLog.logEmailSent({
       recipientEmail: newEmail,
@@ -336,6 +351,7 @@ export class RmPortalService {
       .from('release_plans')
       .select('*')
       .eq('user_id', accountOwnerId)
+      .eq('status', 'active')
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle();

@@ -2,6 +2,11 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Resend } from 'resend';
 
+// Deliberately not delegated to a general-purpose HTML sanitizer: several
+// escaped values here (acceptUrl, cancelUrl, portalUrl) are interpolated
+// inside href="..." attributes, so quote characters must be entity-encoded
+// too — sanitize-html's tag/attribute-filtering model doesn't guarantee that
+// for plain text nodes the way this explicit encoding does.
 function escapeHtml(value: string | null | undefined): string {
   return (value ?? '')
     .replace(/&/g, '&amp;')
@@ -221,12 +226,22 @@ export class EmailService {
   }): Promise<string | null> {
     if (!this.resend) return null;
 
-    const { data, error } = await this.resend.emails.send({
-      from: 'Tether <no-reply@jointether.com>',
-      to: [params.to],
-      subject: params.subject,
-      html: params.html,
-    });
+    // Bounds a stalled network call so callers awaiting this directly (e.g.
+    // signup, invitation flows) can't hang indefinitely on a slow Resend request.
+    const SEND_TIMEOUT_MS = 15000;
+    const timeout = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Resend send timed out')), SEND_TIMEOUT_MS),
+    );
+
+    const { data, error } = await Promise.race([
+      this.resend.emails.send({
+        from: this.config.get<string>('RESEND_FROM_ADDRESS') ?? 'Tether <no-reply@jointether.com>',
+        to: [params.to],
+        subject: params.subject,
+        html: params.html,
+      }),
+      timeout,
+    ]);
 
     if (error) {
       throw new Error(`Resend send failed: ${error.message ?? 'unknown error'}`);

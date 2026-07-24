@@ -7,6 +7,7 @@ import {
   ServiceUnavailableException,
   UseGuards,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { ThrottlerGuard } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { Webhook } from 'svix';
@@ -18,12 +19,15 @@ import { ResendWebhookService } from './resend-webhook.service.js';
 @Controller('webhooks')
 @UseGuards(ThrottlerGuard)
 export class ResendWebhookController {
-  constructor(private readonly resendWebhookService: ResendWebhookService) {}
+  constructor(
+    private readonly resendWebhookService: ResendWebhookService,
+    private readonly config: ConfigService,
+  ) {}
 
   @Post('resend')
   @HttpCode(200)
   async handleResendWebhook(@Req() req: Request & { rawBody?: Buffer }) {
-    const secret = process.env.RESEND_WEBHOOK_SECRET;
+    const secret = this.config.get<string>('RESEND_WEBHOOK_SECRET');
     if (!secret) {
       throw new ServiceUnavailableException('Resend webhook secret not configured');
     }

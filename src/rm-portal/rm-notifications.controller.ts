@@ -12,21 +12,21 @@ export class RmNotificationsController {
 
   @Get()
   async list(@Request() req: any) {
-    return this.rmNotificationsService.listNotifications(req.accountContext.userId);
+    return this.rmNotificationsService.listNotifications(req.accountContext.accountOwnerId);
   }
 
   @Patch(':id/read')
   async markRead(@Request() req: any, @Param('id') id: string) {
-    return this.rmNotificationsService.markRead(req.accountContext.userId, id);
+    return this.rmNotificationsService.markRead(req.accountContext.accountOwnerId, id);
   }
 
   @Patch(':id/unread')
   async markUnread(@Request() req: any, @Param('id') id: string) {
-    return this.rmNotificationsService.markUnread(req.accountContext.userId, id);
+    return this.rmNotificationsService.markUnread(req.accountContext.accountOwnerId, id);
   }
 
   @Get('unread-count')
   async unreadCount(@Request() req: any) {
-    return this.rmNotificationsService.unreadCount(req.accountContext.userId);
+    return this.rmNotificationsService.unreadCount(req.accountContext.accountOwnerId);
   }
 }

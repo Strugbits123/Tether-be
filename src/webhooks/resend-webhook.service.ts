@@ -44,6 +44,12 @@ export class ResendWebhookService {
       return;
     }
 
+    // Resend can redeliver the same webhook event — without this, a replay
+    // would re-run the release_managers/guardians update and re-log activity.
+    if (log.status === 'bounced') {
+      return;
+    }
+
     const bounceReason = data.bounce?.message ?? data.bounce?.type ?? 'Email bounced';
 
     await this.notificationLog.updateStatus(log.id, 'bounced', {
@@ -55,20 +61,37 @@ export class ResendWebhookService {
     const ownerId = (metadata.account_owner_id as string) ?? null;
 
     if (log.email_type === 'rm_invitation' || log.email_type === 'rm_reminder') {
-      await this.supabase
-        .getClient()
-        .from('release_managers')
-        .update({ status: 'bounced', updated_at: new Date().toISOString() })
-        .eq('user_id', ownerId)
-        .eq('email', log.recipient_email);
+      // Mirror the guardian branch's resilience: fall back to an email-only
+      // lookup when account_owner_id wasn't captured in metadata, instead of
+      // silently matching nothing on a null user_id filter.
+      let resolvedOwnerId = ownerId;
+      if (!resolvedOwnerId) {
+        const { data: rm } = await this.supabase
+          .getClient()
+          .from('release_managers')
+          .select('user_id')
+          .eq('email', log.recipient_email)
+          .not('status', 'in', '("revoked","declined")')
+          .maybeSingle();
+        resolvedOwnerId = (rm?.user_id as string) ?? null;
+      }
 
-      if (ownerId) {
+      if (resolvedOwnerId) {
+        await this.supabase
+          .getClient()
+          .from('release_managers')
+          .update({ status: 'bounced', updated_at: new Date().toISOString() })
+          .eq('user_id', resolvedOwnerId)
+          .eq('email', log.recipient_email);
+
         await this.activityService.log(
-          ownerId,
+          resolvedOwnerId,
           'email_bounced',
           `Release Manager invitation bounced — ${log.recipient_email}`,
           { notificationLogId: log.id, email: log.recipient_email, emailType: log.email_type },
         );
+      } else {
+        this.logger.warn(`Could not resolve account owner for bounced RM email ${log.recipient_email}`);
       }
     } else if (log.email_type === 'guardian_invitation') {
       const guardianId = metadata.guardian_id as string | undefined;

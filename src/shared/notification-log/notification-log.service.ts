@@ -23,7 +23,7 @@ export class NotificationLogService {
     try {
       await this.supabase.getClient().from('notification_log').insert({
         user_id: params.userId ?? null,
-        recipient_email: params.recipientEmail,
+        recipient_email: params.recipientEmail.toLowerCase(),
         channel: 'email',
         email_type: params.emailType,
         resend_message_id: params.resendMessageId,

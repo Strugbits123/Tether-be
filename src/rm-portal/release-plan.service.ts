@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import sanitizeHtml from 'sanitize-html';
 import {
   BadRequestException,
   ConflictException,
@@ -440,7 +441,7 @@ export class ReleasePlanService {
           deliveryDate,
         })
         .catch((err) => {
-          this.logger.error(`Failed to email recipient ${recipient.email}`, err);
+          this.logger.error(`Failed to email recipient ${recipient.id}`, err);
           return null;
         });
 
@@ -481,6 +482,27 @@ export class ReleasePlanService {
   }
 
   // GET /release/cancel/:token — public, no auth
+  // Read-only lookup for the public cancel-confirmation page (GET) — never
+  // mutates state. The actual cancellation only happens via cancelByToken,
+  // triggered by an explicit confirmation action (POST).
+  async peekCancelStatus(token: string) {
+    const { data: plan, error } = await this.supabase
+      .getClient()
+      .from('release_plans')
+      .select('status')
+      .eq('cancel_token', token)
+      .maybeSingle();
+
+    if (error || !plan) {
+      throw new NotFoundException('Invalid or expired cancel link.');
+    }
+
+    return {
+      status: plan.status,
+      canCancel: plan.status === 'active',
+    };
+  }
+
   async cancelByToken(token: string) {
     const { data: plan, error } = await this.supabase
       .getClient()
@@ -609,14 +631,22 @@ export class ReleasePlanService {
 
     const deliveredAt = new Date().toISOString();
 
-    const { error } = await this.supabase
+    // Conditioned on delivered_at still being null so two concurrent calls
+    // (e.g. a retried request) can't both "win" and send delivery emails
+    // twice — only the call that actually flips the row proceeds.
+    const { data: updatedRows, error } = await this.supabase
       .getClient()
       .from('release_plans')
       .update({ delivered_at: deliveredAt, updated_at: deliveredAt })
-      .eq('id', plan.id);
+      .eq('id', plan.id)
+      .is('delivered_at', null)
+      .select('id');
 
     if (error) {
       throw new InternalServerErrorException('Failed to advance to delivery.');
+    }
+    if (!updatedRows || updatedRows.length === 0) {
+      throw new ConflictException('This release plan has already been delivered.');
     }
 
     await this.logReleaseEvent(plan.id, 'waiting_period_complete', 'Waiting period complete — no cancellation received', 'system');
@@ -642,7 +672,7 @@ export class ReleasePlanService {
           portalUrl,
         })
         .catch((err) => {
-          this.logger.error(`Failed to send delivery email to ${recipient.email}`, err);
+          this.logger.error(`Failed to send delivery email to recipient ${row.recipient_id}`, err);
           return null;
         });
 
@@ -651,6 +681,7 @@ export class ReleasePlanService {
         emailType: 'recipient_notification',
         resendMessageId: messageId,
         metadata: {
+          account_owner_id: accountOwnerId,
           release_plan_id: plan.id,
           name: recipient.name,
           recipient_id: row.recipient_id,
@@ -845,14 +876,16 @@ export class ReleasePlanService {
     deliveryStatus: { recipients: Array<{ name: string; portal_status: string }> } | null,
     contentSummary: { content_summary: Record<string, number> },
   ): string {
+    const esc = (v: unknown) => sanitizeHtml(String(v ?? ''), { allowedTags: [] });
+
     const events = activityLog.events
-      .map((e) => `<tr><td>${e.created_at}</td><td>${e.event_label}</td></tr>`)
+      .map((e) => `<tr><td>${esc(e.created_at)}</td><td>${esc(e.event_label)}</td></tr>`)
       .join('');
     const recipientRows = (deliveryStatus?.recipients ?? [])
-      .map((r) => `<tr><td>${r.name}</td><td>${r.portal_status}</td></tr>`)
+      .map((r) => `<tr><td>${esc(r.name)}</td><td>${esc(r.portal_status)}</td></tr>`)
       .join('');
     const summaryRows = Object.entries(contentSummary.content_summary)
-      .map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`)
+      .map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`)
       .join('');
 
     return `<!DOCTYPE html>
@@ -862,11 +895,11 @@ h1{font-size:1.6em}
 table{width:100%;border-collapse:collapse;margin-bottom:2em}
 td{border-bottom:1px solid #eee;padding:6px 8px}
 </style></head><body>
-<h1>Release Plan ${plan.plan_id}</h1>
-<p><strong>Account owner:</strong> ${owner?.full_name ?? ''}</p>
-<p><strong>Initiated:</strong> ${plan.initiated_at}</p>
-<p><strong>Delivery scheduled:</strong> ${plan.delivery_scheduled_at}</p>
-<p><strong>Reason:</strong> ${plan.reason}</p>
+<h1>Release Plan ${esc(plan.plan_id)}</h1>
+<p><strong>Account owner:</strong> ${esc(owner?.full_name)}</p>
+<p><strong>Initiated:</strong> ${esc(plan.initiated_at)}</p>
+<p><strong>Delivery scheduled:</strong> ${esc(plan.delivery_scheduled_at)}</p>
+<p><strong>Reason:</strong> ${esc(plan.reason)}</p>
 <h2>Content Summary</h2>
 <table>${summaryRows}</table>
 <h2>Recipient Delivery Status</h2>

@@ -5,6 +5,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Archiver, ZipArchive } from 'archiver';
+import sanitizeHtml from 'sanitize-html';
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
 import { ActivityService } from '../activity/activity.service.js';
 import { PdfService } from '../memoir/pdf.service.js';
@@ -19,6 +20,28 @@ function extFromPath(path: string): string {
   const match = /\.([a-zA-Z0-9]+)$/.exec(path);
   return match ? match[1] : 'bin';
 }
+
+// Runs `fn` over `items` with at most `limit` in flight at once — per-file
+// downloads/PDF generation were previously fully sequential, which serializes
+// I/O that could otherwise overlap.
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+const DOWNLOAD_CONCURRENCY = 5;
 
 @Injectable()
 export class RmDownloadsService {
@@ -114,21 +137,17 @@ export class RmDownloadsService {
     };
   }
 
-  // POST /rm/downloads/prepare
+  // POST /rm/downloads/prepare — returns the archive stream itself (not a
+  // fully-buffered zip) so the controller can pipe it straight to the HTTP
+  // response as entries are compressed, rather than holding the whole
+  // package in memory before the client sees a single byte.
   async prepareDownload(
     ownerId: string,
     dto: PrepareDownloadDto,
-  ): Promise<{ buffer: Buffer; filename: string }> {
+  ): Promise<{ archive: Archiver; filename: string }> {
     await this.assertReleaseInitiated(ownerId);
 
     const archive = new ZipArchive({ zlib: { level: 9 } });
-    const chunks: Buffer[] = [];
-    archive.on('data', (chunk: Buffer) => chunks.push(chunk));
-    const done = new Promise<void>((resolve, reject) => {
-      archive.on('end', resolve);
-      archive.on('error', reject);
-    });
-
     const client = this.supabase.getClient();
     let fileCount = 0;
 
@@ -148,14 +167,11 @@ export class RmDownloadsService {
       fileCount += await this.addLifeStory(archive, ownerId);
     }
 
-    await archive.finalize();
-    await done;
-
     this.activityService.log(ownerId, 'content_downloaded', 'Release Manager downloaded content package', {
       fileCount,
     });
 
-    return { buffer: Buffer.concat(chunks), filename: 'Tether-Content.zip' };
+    return { archive, filename: 'Tether-Content.zip' };
   }
 
   private async downloadFromBucket(
@@ -186,16 +202,15 @@ export class RmDownloadsService {
       .eq('type', 'audio')
       .in('id', [...assignedIds]);
 
-    let count = 0;
-    for (const m of messages ?? []) {
-      if (!m.storage_path) continue;
+    const results = await mapWithConcurrency(messages ?? [], DOWNLOAD_CONCURRENCY, async (m) => {
+      if (!m.storage_path) return false;
       const buffer = await this.downloadFromBucket(client, 'audio', m.storage_path);
-      if (!buffer) continue;
+      if (!buffer) return false;
       const ext = extFromPath(m.storage_path);
       archive.append(buffer, { name: `Audio Messages/${sanitizeFileName(m.title || 'Untitled')}.${ext}` });
-      count++;
-    }
-    return count;
+      return true;
+    });
+    return results.filter(Boolean).length;
   }
 
   private async addDocuments(
@@ -212,19 +227,18 @@ export class RmDownloadsService {
       .eq('user_id', ownerId)
       .in('id', [...assignedIds]);
 
-    let count = 0;
-    for (const d of documents ?? []) {
-      if (!d.storage_path) continue;
+    const results = await mapWithConcurrency(documents ?? [], DOWNLOAD_CONCURRENCY, async (d) => {
+      if (!d.storage_path) return false;
       const buffer = await this.downloadFromBucket(client, 'documents', d.storage_path);
-      if (!buffer) continue;
+      if (!buffer) return false;
       const ext = extFromPath(d.original_filename || d.storage_path);
       const baseName = d.original_filename
         ? sanitizeFileName(d.original_filename)
         : `${sanitizeFileName(d.title || 'Untitled')}.${ext}`;
       archive.append(buffer, { name: `Documents/${baseName}` });
-      count++;
-    }
-    return count;
+      return true;
+    });
+    return results.filter(Boolean).length;
   }
 
   private async addPhotos(
@@ -241,17 +255,16 @@ export class RmDownloadsService {
       .eq('user_id', ownerId)
       .in('id', [...assignedIds]);
 
-    let count = 0;
-    for (const p of photos ?? []) {
-      if (!p.storage_path) continue;
+    const results = await mapWithConcurrency(photos ?? [], DOWNLOAD_CONCURRENCY, async (p, i) => {
+      if (!p.storage_path) return false;
       // Full-resolution original — never the compressed variant.
       const buffer = await this.downloadFromBucket(client, 'photos', p.storage_path);
-      if (!buffer) continue;
+      if (!buffer) return false;
       const ext = extFromPath(p.storage_path);
-      archive.append(buffer, { name: `Photos/${sanitizeFileName(p.title || `Photo-${count + 1}`)}.${ext}` });
-      count++;
-    }
-    return count;
+      archive.append(buffer, { name: `Photos/${sanitizeFileName(p.title || `Photo-${i + 1}`)}.${ext}` });
+      return true;
+    });
+    return results.filter(Boolean).length;
   }
 
   private async addTranscripts(
@@ -268,22 +281,18 @@ export class RmDownloadsService {
       .eq('user_id', ownerId)
       .in('id', [...assignedIds]);
 
-    let count = 0;
-    for (const m of messages ?? []) {
-      if (!m.transcript || !m.transcript.trim()) continue;
+    const results = await mapWithConcurrency(messages ?? [], DOWNLOAD_CONCURRENCY, async (m) => {
+      if (!m.transcript || !m.transcript.trim()) return false;
       const html = this.buildTranscriptHtml(m.title || 'Untitled Message', m.type, m.transcript);
       const buffer = await this.pdfService.generatePdfFromHtml(html);
       archive.append(buffer, { name: `Transcripts/${sanitizeFileName(m.title || 'Untitled Message')}.pdf` });
-      count++;
-    }
-    return count;
+      return true;
+    });
+    return results.filter(Boolean).length;
   }
 
   private buildTranscriptHtml(title: string, type: string, transcript: string): string {
-    const escaped = transcript
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
+    const esc = (v: string) => sanitizeHtml(v, { allowedTags: [] });
     return `<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><style>
 body{font-family:sans-serif;color:#222;line-height:1.6;padding:2em}
@@ -291,9 +300,9 @@ h1{font-size:1.4em}
 .meta{color:#888;font-size:0.9em;margin-bottom:1.5em;text-transform:uppercase}
 p{white-space:pre-wrap}
 </style></head><body>
-<h1>${title}</h1>
-<p class="meta">${type} message transcript</p>
-<p>${escaped}</p>
+<h1>${esc(title)}</h1>
+<p class="meta">${esc(type)} message transcript</p>
+<p>${esc(transcript)}</p>
 </body></html>`;
   }
 

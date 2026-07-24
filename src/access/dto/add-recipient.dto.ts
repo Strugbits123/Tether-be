@@ -36,6 +36,12 @@ export class AddRecipientDto {
   @IsBoolean()
   designate_as_guardian?: boolean;
 
+  /** Required (must be `true`) when `designate_as_guardian` is set — same
+   *  legal acknowledgment gate as the standalone guardian-designation flow. */
+  @IsOptional()
+  @IsBoolean()
+  legal_acknowledged?: boolean;
+
   @IsOptional()
   @IsString()
   @MaxLength(500)
