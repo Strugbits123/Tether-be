@@ -19,6 +19,15 @@ export class SignupDto {
   @MaxLength(100)
   last_name?: string;
 
+  // Set when signup was reached via an invitation link
+  // (`/auth/signup?invite_token=...`). The actual acceptance happens
+  // client-side (AuthContext.finalizePendingInvite) once a session exists —
+  // this is accepted here only so the whitelist validator doesn't reject the
+  // request; it isn't currently read server-side.
+  @IsOptional()
+  @IsString()
+  invite_token?: string;
+
   // Acquisition attribution — collected client-side (landing URL + referrer)
   // and passed through so user_signed_up carries it server-side. Non-PII.
   @IsOptional()
