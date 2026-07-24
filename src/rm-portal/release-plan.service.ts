@@ -425,6 +425,7 @@ export class ReleasePlanService {
       emailType: 'recipient_notification',
       resendMessageId: ownerMessageId,
       metadata: {
+        account_owner_id: accountOwnerId,
         release_plan_id: planId,
         name: owner.full_name,
         party_role: 'account_owner',
@@ -450,7 +451,9 @@ export class ReleasePlanService {
         emailType: 'recipient_notification',
         resendMessageId: messageId,
         metadata: {
+          account_owner_id: accountOwnerId,
           release_plan_id: planId,
+          recipient_id: recipient.id,
           name: recipient.name,
           party_role: 'recipient',
           channel: recipient.phone ? 'email+sms' : 'email',
@@ -569,12 +572,12 @@ export class ReleasePlanService {
     const { data: recipients } = await this.supabase
       .getClient()
       .from('recipients')
-      .select('name, email')
+      .select('id, name, email')
       .eq('user_id', plan.user_id);
 
     const parties = [
-      { name: owner.full_name, email: owner.email },
-      ...((recipients ?? []) as Array<{ name: string; email: string }>),
+      { id: null as string | null, name: owner.full_name, email: owner.email },
+      ...((recipients ?? []) as Array<{ id: string; name: string; email: string }>),
     ];
 
     for (const party of parties) {
@@ -591,7 +594,12 @@ export class ReleasePlanService {
         recipientEmail: party.email,
         emailType: 'recipient_notification',
         resendMessageId: messageId,
-        metadata: { release_plan_id: plan.id, name: party.name },
+        metadata: {
+          account_owner_id: plan.user_id,
+          release_plan_id: plan.id,
+          name: party.name,
+          ...(party.id ? { recipient_id: party.id } : { party_role: 'account_owner' }),
+        },
       });
     }
   }

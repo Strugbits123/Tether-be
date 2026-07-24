@@ -22,6 +22,24 @@ import { InviteRecipientDto } from './dto/invite-recipient.dto.js';
 import { RelationshipType } from '../recipients/dto/create-recipient.dto.js';
 import { RmRelationshipType } from '../release-managers/dto/create-release-manager.dto.js';
 
+// getClient() has no generated Database type param, so every read otherwise
+// resolves to `any` — narrow the shapes we actually rely on explicitly
+// instead, rather than trusting untyped `data` fields throughout this file.
+interface OwnerRow {
+  id: string;
+  full_name: string;
+  email: string;
+}
+
+interface MembershipRow {
+  id: string;
+  role: string;
+  status: string;
+  invite_email: string | null;
+  invite_name: string | null;
+  account_owner_id: string;
+}
+
 function splitName(name: string): { firstName: string; lastName: string } {
   const trimmed = name.trim();
   const idx = trimmed.indexOf(' ');
@@ -64,14 +82,14 @@ export class InvitationsService {
     return this.config.get<string>('FRONTEND_URL') ?? 'https://app.jointether.com';
   }
 
-  private async getOwner(ownerId: string) {
+  private async getOwner(ownerId: string): Promise<OwnerRow | null> {
     const { data } = await this.supabase
       .getClient()
       .from('users')
       .select('id, full_name, email')
       .eq('id', ownerId)
       .single();
-    return data;
+    return data as OwnerRow | null;
   }
 
   // Checks whether `email` already belongs to a Tether user; returns the
@@ -84,7 +102,7 @@ export class InvitationsService {
       .select('id')
       .eq('email', email.toLowerCase())
       .maybeSingle();
-    return data?.id ?? null;
+    return (data as { id: string } | null)?.id ?? null;
   }
 
   // POST /invitations/release-manager
@@ -370,12 +388,13 @@ export class InvitationsService {
 
   // GET /invitations/accept/:token
   async acceptInvitation(token: string, userId: string | null) {
-    const { data: membership, error } = await this.supabase
+    const { data, error } = await this.supabase
       .getClient()
       .from('account_memberships')
       .select('id, role, status, invite_email, invite_name, account_owner_id')
       .eq('invitation_token', token)
       .maybeSingle();
+    const membership = data as MembershipRow | null;
 
     if (error || !membership) {
       throw new NotFoundException('Invitation not found');
@@ -403,12 +422,13 @@ export class InvitationsService {
     // stumbles on an invite link while signed in could claim a stranger's
     // pending Release Manager/Guardian/Recipient membership.
     if (membership.invite_email) {
-      const { data: authedUser } = await this.supabase
+      const { data: authedUserData } = await this.supabase
         .getClient()
         .from('users')
         .select('email')
         .eq('id', userId)
         .maybeSingle();
+      const authedUser = authedUserData as { email: string } | null;
 
       if (!authedUser || authedUser.email.toLowerCase() !== membership.invite_email.toLowerCase()) {
         throw new ForbiddenException(
