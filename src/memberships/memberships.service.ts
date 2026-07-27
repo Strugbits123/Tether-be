@@ -126,6 +126,29 @@ export class MembershipsService {
     return new Map((data ?? []).map((u) => [u.id, u]));
   }
 
+  // GET /auth/pending-invite-check — used right after email confirmation to
+  // decide whether a fresh signup should skip the owner onboarding wizard.
+  // Queried with the service-role client because RLS on account_memberships
+  // has no read policy for a still-pending invite (user_id is null until
+  // acceptance), so the frontend can never resolve this directly against
+  // Supabase itself.
+  async hasNonOwnerMembership(userId: string, email: string | null | undefined): Promise<boolean> {
+    const filter = email
+      ? `user_id.eq.${userId},invite_email.eq.${email.toLowerCase()}`
+      : `user_id.eq.${userId}`;
+
+    const { data } = await this.supabase
+      .getClient()
+      .from('account_memberships')
+      .select('id')
+      .or(filter)
+      .neq('role', 'owner')
+      .limit(1)
+      .maybeSingle();
+
+    return !!data;
+  }
+
   // POST /auth/switch-context
   async switchContext(userId: string, membershipId: string) {
     const membership = await this.getValidMembership(userId, membershipId);

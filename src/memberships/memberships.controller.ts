@@ -41,4 +41,15 @@ export class MembershipsController {
       req.accountContext.membershipId,
     );
   }
+
+  // GET /api/v1/auth/pending-invite-check — used right after email
+  // confirmation to decide whether to skip the owner onboarding wizard.
+  @Get('pending-invite-check')
+  async hasPendingInvite(@Request() req: any) {
+    const hasPendingInvite = await this.membershipsService.hasNonOwnerMembership(
+      req.user.id,
+      req.user.email,
+    );
+    return { has_pending_invite: hasPendingInvite };
+  }
 }
