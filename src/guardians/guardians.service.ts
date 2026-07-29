@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import {
   ConflictException,
   Injectable,
@@ -58,19 +59,33 @@ export class GuardiansService {
       throw new ConflictException('Maximum of 3 Guardians already designated.');
     }
 
+    // `guardians` has a unique (account_id, email) constraint, and revoking a
+    // guardian is a soft-delete (the row stays with status: 'revoked') — so
+    // re-designating the same recipient later must reactivate that row
+    // instead of inserting a duplicate, which would violate the constraint.
+    // Every lifecycle field is reset explicitly since upsert only applies
+    // column defaults on a genuine insert, not on the update branch.
     const { data: guardian, error } = await this.supabase
       .getClient()
       .from('guardians')
-      .insert({
-        account_id: data.accountId,
-        guardian_user_id: data.userId ?? null,
-        name: data.name,
-        email: data.email.toLowerCase(),
-        relationship: data.relationship,
-        priority_order: data.priorityOrder,
-        status: 'invited',
-        invitation_sent_at: new Date().toISOString(),
-      })
+      .upsert(
+        {
+          account_id: data.accountId,
+          guardian_user_id: data.userId ?? null,
+          name: data.name,
+          email: data.email.toLowerCase(),
+          relationship: data.relationship,
+          priority_order: data.priorityOrder,
+          status: 'invited',
+          invitation_token: randomUUID(),
+          invitation_sent_at: new Date().toISOString(),
+          accepted_at: null,
+          declined_at: null,
+          revoked_at: null,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'account_id,email' },
+      )
       .select(GUARDIAN_COLUMNS)
       .single();
 
