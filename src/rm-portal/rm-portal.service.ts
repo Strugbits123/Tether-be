@@ -42,13 +42,21 @@ export class RmPortalService {
     const { data: owner, error } = await this.supabase
       .getClient()
       .from('users')
-      .select('id, full_name, avatar_url')
+      .select('id, full_name, avatar_url, email')
       .eq('id', accountOwnerId)
       .single();
 
     if (error || !owner) {
       throw new NotFoundException('Account owner not found');
     }
+
+    // full_name is blank for any owner who never finished their profile
+    // (first_name/last_name were never set) — fall back to their email's
+    // local part rather than showing the RM a blank name.
+    const ownerDisplayName =
+      (owner.full_name && owner.full_name.trim()) ||
+      owner.email?.split('@')[0] ||
+      'Account Owner';
 
     const supabase = this.supabase.getClient();
 
@@ -109,7 +117,7 @@ export class RmPortalService {
     return {
       account_owner: {
         id: owner.id,
-        name: owner.full_name,
+        name: ownerDisplayName,
         avatar_url: owner.avatar_url ?? null,
       },
       content_stats: {
