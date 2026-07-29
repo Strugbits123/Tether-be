@@ -2,7 +2,6 @@ import {
   Body,
   Controller,
   Delete,
-  Get,
   Headers,
   Param,
   Post,
@@ -61,7 +60,12 @@ export class InvitationsController {
   // Reachable by both logged-in and anonymous visitors — resolves the caller
   // manually via the bearer token instead of JwtAuthGuard, which would 401 an
   // unauthenticated click-through from the invitation email.
-  @Get('accept/:token')
+  //
+  // POST, not GET: accepting an invitation mutates state (it creates the
+  // membership), so it must not sit behind a safe/idempotent method that link
+  // previewers, crawlers and browser prefetch are free to fetch on their own.
+  // The frontend only calls this from an explicit button submission.
+  @Post('accept/:token')
   async acceptInvitation(
     @Param('token') token: string,
     @Headers('authorization') authHeader?: string,

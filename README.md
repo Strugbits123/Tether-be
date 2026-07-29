@@ -178,7 +178,7 @@ GET  /auth/pending-invite-check    # any non-owner membership by user_id or invi
 POST   /invitations/release-manager
 POST   /invitations/guardian
 POST   /invitations/recipient
-GET    /invitations/accept/:token   # public — no auth required for the initial check
+POST   /invitations/accept/:token   # public — no auth required; mutating, so not a GET
 POST   /invitations/resend/:id
 DELETE /invitations/:id             # revokes the membership + cascades to the
                                      # release_managers/guardians/recipients row

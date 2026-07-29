@@ -386,7 +386,7 @@ export class InvitationsService {
     };
   }
 
-  // GET /invitations/accept/:token
+  // POST /invitations/accept/:token
   async acceptInvitation(token: string, userId: string | null) {
     const { data, error } = await this.supabase
       .getClient()

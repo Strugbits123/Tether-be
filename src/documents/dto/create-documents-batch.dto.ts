@@ -26,9 +26,13 @@ export class DocumentItemDto {
   @MaxLength(255)
   originalFilename: string;
 
+  // Must stay a superset of the values MIME_TO_EXT (documents.service.ts) can
+  // produce. A MIME accepted at the signed-URL step but rejected here fails
+  // *after* the bytes are already in storage, orphaning the object — which is
+  // exactly what happened while 'm4v' (from video/x-m4v) was missing.
   @IsIn([
     'pdf', 'docx', 'jpg', 'jpeg', 'png', 'heic',
-    'mp3', 'm4a', 'wav', 'ogg', 'aac', 'webm', 'mp4', 'mov', 'avi', 'mpeg',
+    'mp3', 'm4a', 'wav', 'ogg', 'aac', 'webm', 'mp4', 'mov', 'm4v', 'avi', 'mpeg',
   ])
   fileType: string;
 
