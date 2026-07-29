@@ -20,7 +20,10 @@ import { UpdateDocumentDto } from './dto/update-document.dto.js';
 const MIME_TO_EXT: Record<string, string> = {
   'application/pdf': 'pdf',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
-  'application/msword': 'docx',
+  // Legacy Word format — a real .doc, not .docx. Mapping it to 'docx' would
+  // persist the wrong extension as the document's permanent file_type (the
+  // viewer renders file_type verbatim).
+  'application/msword': 'doc',
   'image/jpeg': 'jpg',
   'image/png': 'png',
   'image/heic': 'heic',
@@ -283,10 +286,12 @@ export class DocumentsService {
     }
 
     if (fileType === 'documents') {
-      query = query.in('mime_type', [
-        'application/pdf',
-        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      ]);
+      // Must stay consistent with getDocumentStats, which counts anything
+      // application/* as a document. An explicit allow-list here silently
+      // dropped application/msword (.doc): it was counted in the Documents
+      // tile, yet returned by neither this filter nor 'other' (which excludes
+      // all application/*) — so a .doc was reachable under no filter at all.
+      query = (query as any).like('mime_type', 'application/%');
     } else if (fileType === 'audio') {
       query = (query as any).like('mime_type', 'audio/%');
     } else if (fileType === 'video') {

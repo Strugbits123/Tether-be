@@ -31,7 +31,7 @@ export class DocumentItemDto {
   // *after* the bytes are already in storage, orphaning the object — which is
   // exactly what happened while 'm4v' (from video/x-m4v) was missing.
   @IsIn([
-    'pdf', 'docx', 'jpg', 'jpeg', 'png', 'heic',
+    'pdf', 'docx', 'doc', 'jpg', 'jpeg', 'png', 'heic',
     'mp3', 'm4a', 'wav', 'ogg', 'aac', 'webm', 'mp4', 'mov', 'm4v', 'avi', 'mpeg',
   ])
   fileType: string;
