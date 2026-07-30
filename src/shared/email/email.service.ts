@@ -229,25 +229,38 @@ export class EmailService {
     // Bounds a stalled network call so callers awaiting this directly (e.g.
     // signup, invitation flows) can't hang indefinitely on a slow Resend request.
     const SEND_TIMEOUT_MS = 15000;
-    const timeout = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Resend send timed out')), SEND_TIMEOUT_MS),
-    );
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(
+        () => reject(new Error('Resend send timed out')),
+        SEND_TIMEOUT_MS,
+      );
+    });
 
-    const { data, error } = await Promise.race([
-      this.resend.emails.send({
-        from: this.config.get<string>('RESEND_FROM_ADDRESS') ?? 'Tether <no-reply@jointether.com>',
-        to: [params.to],
-        subject: params.subject,
-        html: params.html,
-      }),
-      timeout,
-    ]);
+    const sendPromise = this.resend.emails.send({
+      from: this.config.get<string>('RESEND_FROM_ADDRESS') ?? 'Tether <no-reply@jointether.com>',
+      to: [params.to],
+      subject: params.subject,
+      html: params.html,
+    });
 
-    if (error) {
-      throw new Error(`Resend send failed: ${error.message ?? 'unknown error'}`);
+    // Promise.race doesn't cancel the loser. If the timeout wins, this promise
+    // is still in flight and would raise an unhandled rejection when it later
+    // fails, so attach a no-op catch up front.
+    sendPromise.catch(() => undefined);
+
+    try {
+      const { data, error } = await Promise.race([sendPromise, timeout]);
+
+      if (error) {
+        throw new Error(`Resend send failed: ${error.message ?? 'unknown error'}`);
+      }
+
+      return data?.id ?? null;
+    } finally {
+      // Otherwise a successful send leaves the timer pending for the full 15s.
+      clearTimeout(timeoutHandle);
     }
-
-    return data?.id ?? null;
   }
 
   private buildRmInvitationHtml(params: {

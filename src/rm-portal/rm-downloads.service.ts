@@ -137,41 +137,73 @@ export class RmDownloadsService {
     };
   }
 
-  // POST /rm/downloads/prepare — returns the archive stream itself (not a
-  // fully-buffered zip) so the controller can pipe it straight to the HTTP
-  // response as entries are compressed, rather than holding the whole
-  // package in memory before the client sees a single byte.
+  // POST /rm/downloads/prepare — hands back the archive plus a `populate`
+  // callback rather than a finished zip. The controller pipes the archive to
+  // the response *first* and only then awaits populate(), so entries stream out
+  // as they're compressed. Appending everything here before returning would
+  // buffer the whole package (all audio, photos, documents, PDFs) in memory
+  // with nothing draining it — an OOM/latency risk on a large account.
   async prepareDownload(
     ownerId: string,
     dto: PrepareDownloadDto,
-  ): Promise<{ archive: Archiver; filename: string }> {
+  ): Promise<{
+    archive: Archiver;
+    filename: string;
+    populate: () => Promise<void>;
+  }> {
     await this.assertReleaseInitiated(ownerId);
 
     const archive = new ZipArchive({ zlib: { level: 9 } });
     const client = this.supabase.getClient();
-    let fileCount = 0;
 
-    if (dto.audio !== false) {
-      fileCount += await this.addAudioMessages(archive, ownerId, client);
-    }
-    if (dto.documents !== false) {
-      fileCount += await this.addDocuments(archive, ownerId, client);
-    }
-    if (dto.photos !== false) {
-      fileCount += await this.addPhotos(archive, ownerId, client);
-    }
-    if (dto.transcripts !== false) {
-      fileCount += await this.addTranscripts(archive, ownerId, client);
-    }
-    if (dto.life_story !== false) {
-      fileCount += await this.addLifeStory(archive, ownerId);
-    }
+    const populate = async () => {
+      // Per-folder name allocator: entry names derive from user-controlled
+      // titles, so two items sharing a title would otherwise write identical
+      // paths and most extractors keep only one — losing content from the
+      // handoff package while fileCount still reported both.
+      const usedNames = new Set<string>();
+      const uniqueName = (name: string): string => {
+        if (!usedNames.has(name)) {
+          usedNames.add(name);
+          return name;
+        }
+        const dot = name.lastIndexOf('.');
+        const stem = dot > 0 ? name.slice(0, dot) : name;
+        const ext = dot > 0 ? name.slice(dot) : '';
+        for (let n = 2; ; n++) {
+          const candidate = `${stem}-${n}${ext}`;
+          if (!usedNames.has(candidate)) {
+            usedNames.add(candidate);
+            return candidate;
+          }
+        }
+      };
 
-    this.activityService.log(ownerId, 'content_downloaded', 'Release Manager downloaded content package', {
-      fileCount,
-    });
+      let fileCount = 0;
+      if (dto.audio !== false) {
+        fileCount += await this.addAudioMessages(archive, ownerId, client, uniqueName);
+      }
+      if (dto.documents !== false) {
+        fileCount += await this.addDocuments(archive, ownerId, client, uniqueName);
+      }
+      if (dto.photos !== false) {
+        fileCount += await this.addPhotos(archive, ownerId, client, uniqueName);
+      }
+      if (dto.transcripts !== false) {
+        fileCount += await this.addTranscripts(archive, ownerId, client, uniqueName);
+      }
+      if (dto.life_story !== false) {
+        fileCount += await this.addLifeStory(archive, ownerId, uniqueName);
+      }
 
-    return { archive, filename: 'Tether-Content.zip' };
+      // Logged only after every entry is appended — previously this recorded a
+      // successful download before a single byte had reached the client.
+      this.activityService.log(ownerId, 'content_downloaded', 'Release Manager downloaded content package', {
+        fileCount,
+      });
+    };
+
+    return { archive, filename: 'Tether-Content.zip', populate };
   }
 
   private async downloadFromBucket(
@@ -191,23 +223,32 @@ export class RmDownloadsService {
     archive: Archiver,
     ownerId: string,
     client: ReturnType<SupabaseService['getClient']>,
+    uniqueName: (name: string) => string,
   ): Promise<number> {
     const assignedIds = await this.getAssignedContentIds(ownerId, 'message');
     if (assignedIds.size === 0) return 0;
 
-    const { data: messages } = await client
+    const { data: messages, error: messagesError } = await client
       .from('messages')
       .select('id, title, storage_path, mime_type')
       .eq('user_id', ownerId)
       .eq('type', 'audio')
       .in('id', [...assignedIds]);
 
+    // Surfaced like getAssignedContentIds: swallowing this would omit the whole
+    // category and hand the RM an incomplete package that looks successful.
+    if (messagesError) {
+      throw new InternalServerErrorException('Failed to fetch audio messages for download.');
+    }
+
     const results = await mapWithConcurrency(messages ?? [], DOWNLOAD_CONCURRENCY, async (m) => {
       if (!m.storage_path) return false;
       const buffer = await this.downloadFromBucket(client, 'audio', m.storage_path);
       if (!buffer) return false;
       const ext = extFromPath(m.storage_path);
-      archive.append(buffer, { name: `Audio Messages/${sanitizeFileName(m.title || 'Untitled')}.${ext}` });
+      archive.append(buffer, {
+        name: uniqueName(`Audio Messages/${sanitizeFileName(m.title || 'Untitled')}.${ext}`),
+      });
       return true;
     });
     return results.filter(Boolean).length;
@@ -217,15 +258,20 @@ export class RmDownloadsService {
     archive: Archiver,
     ownerId: string,
     client: ReturnType<SupabaseService['getClient']>,
+    uniqueName: (name: string) => string,
   ): Promise<number> {
     const assignedIds = await this.getAssignedContentIds(ownerId, 'document');
     if (assignedIds.size === 0) return 0;
 
-    const { data: documents } = await client
+    const { data: documents, error: documentsError } = await client
       .from('documents')
       .select('id, title, original_filename, storage_path')
       .eq('user_id', ownerId)
       .in('id', [...assignedIds]);
+
+    if (documentsError) {
+      throw new InternalServerErrorException('Failed to fetch documents for download.');
+    }
 
     const results = await mapWithConcurrency(documents ?? [], DOWNLOAD_CONCURRENCY, async (d) => {
       if (!d.storage_path) return false;
@@ -235,7 +281,7 @@ export class RmDownloadsService {
       const baseName = d.original_filename
         ? sanitizeFileName(d.original_filename)
         : `${sanitizeFileName(d.title || 'Untitled')}.${ext}`;
-      archive.append(buffer, { name: `Documents/${baseName}` });
+      archive.append(buffer, { name: uniqueName(`Documents/${baseName}`) });
       return true;
     });
     return results.filter(Boolean).length;
@@ -245,15 +291,20 @@ export class RmDownloadsService {
     archive: Archiver,
     ownerId: string,
     client: ReturnType<SupabaseService['getClient']>,
+    uniqueName: (name: string) => string,
   ): Promise<number> {
     const assignedIds = await this.getAssignedContentIds(ownerId, 'photo');
     if (assignedIds.size === 0) return 0;
 
-    const { data: photos } = await client
+    const { data: photos, error: photosError } = await client
       .from('photos')
       .select('id, title, storage_path')
       .eq('user_id', ownerId)
       .in('id', [...assignedIds]);
+
+    if (photosError) {
+      throw new InternalServerErrorException('Failed to fetch photos for download.');
+    }
 
     const results = await mapWithConcurrency(photos ?? [], DOWNLOAD_CONCURRENCY, async (p, i) => {
       if (!p.storage_path) return false;
@@ -261,7 +312,9 @@ export class RmDownloadsService {
       const buffer = await this.downloadFromBucket(client, 'photos', p.storage_path);
       if (!buffer) return false;
       const ext = extFromPath(p.storage_path);
-      archive.append(buffer, { name: `Photos/${sanitizeFileName(p.title || `Photo-${i + 1}`)}.${ext}` });
+      archive.append(buffer, {
+        name: uniqueName(`Photos/${sanitizeFileName(p.title || `Photo-${i + 1}`)}.${ext}`),
+      });
       return true;
     });
     return results.filter(Boolean).length;
@@ -271,21 +324,28 @@ export class RmDownloadsService {
     archive: Archiver,
     ownerId: string,
     client: ReturnType<SupabaseService['getClient']>,
+    uniqueName: (name: string) => string,
   ): Promise<number> {
     const assignedIds = await this.getAssignedContentIds(ownerId, 'message');
     if (assignedIds.size === 0) return 0;
 
-    const { data: messages } = await client
+    const { data: messages, error: transcriptsError } = await client
       .from('messages')
       .select('id, title, type, transcript, created_at')
       .eq('user_id', ownerId)
       .in('id', [...assignedIds]);
 
+    if (transcriptsError) {
+      throw new InternalServerErrorException('Failed to fetch transcripts for download.');
+    }
+
     const results = await mapWithConcurrency(messages ?? [], DOWNLOAD_CONCURRENCY, async (m) => {
       if (!m.transcript || !m.transcript.trim()) return false;
       const html = this.buildTranscriptHtml(m.title || 'Untitled Message', m.type, m.transcript);
       const buffer = await this.pdfService.generatePdfFromHtml(html);
-      archive.append(buffer, { name: `Transcripts/${sanitizeFileName(m.title || 'Untitled Message')}.pdf` });
+      archive.append(buffer, {
+        name: uniqueName(`Transcripts/${sanitizeFileName(m.title || 'Untitled Message')}.pdf`),
+      });
       return true;
     });
     return results.filter(Boolean).length;
@@ -306,7 +366,11 @@ p{white-space:pre-wrap}
 </body></html>`;
   }
 
-  private async addLifeStory(archive: Archiver, ownerId: string): Promise<number> {
+  private async addLifeStory(
+    archive: Archiver,
+    ownerId: string,
+    uniqueName: (name: string) => string,
+  ): Promise<number> {
     const assignedChapterIds = await this.getAssignedContentIds(ownerId, 'chapter');
     if (assignedChapterIds.size === 0) return 0;
 
@@ -339,7 +403,7 @@ p{white-space:pre-wrap}
         body: c.body,
       })),
     });
-    archive.append(buffer, { name: 'Life Story.pdf' });
+    archive.append(buffer, { name: uniqueName('Life Story.pdf') });
     return chapters.length;
   }
 }

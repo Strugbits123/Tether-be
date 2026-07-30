@@ -38,6 +38,13 @@ export class DocumentFileDescriptorDto {
     'video/mp4',
     'video/webm',
     'video/quicktime',
+    // Apple's MPEG-4 variant. Every other layer already treats m4v as
+    // supported (MIME_TO_EXT maps it, DocumentItemDto.fileType accepts 'm4v',
+    // and the web picker offers .m4v) — omitting it here meant a browser that
+    // reported video/x-m4v got a hard 400 at the signed-URL step, while the
+    // same file reported as video/mp4 uploaded fine. Requires 'video/x-m4v' in
+    // the documents bucket's allowed_mime_types too (db/storage-limits.sql).
+    'video/x-m4v',
     'video/x-msvideo',
     'video/mpeg',
   ])

@@ -2,6 +2,7 @@ import {
   ForbiddenException,
   Injectable,
   InternalServerErrorException,
+  Logger,
 } from '@nestjs/common';
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
 
@@ -26,6 +27,8 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
 
 @Injectable()
 export class MembershipsService {
+  private readonly logger = new Logger(MembershipsService.name);
+
   constructor(private readonly supabase: SupabaseService) {}
 
   // GET /auth/memberships
@@ -90,13 +93,41 @@ export class MembershipsService {
 
     await Promise.all(
       ownerIds.map(async (ownerId) => {
-        const [{ count: messages }, { count: documents }, { count: recipients }, { data: activePlan }] =
+        const [messagesRes, documentsRes, recipientsRes, activePlanRes] =
           await Promise.all([
             client.from('messages').select('id', { count: 'exact', head: true }).eq('user_id', ownerId),
             client.from('documents').select('id', { count: 'exact', head: true }).eq('user_id', ownerId),
             client.from('recipients').select('id', { count: 'exact', head: true }).eq('user_id', ownerId),
             client.from('release_plans').select('id').eq('user_id', ownerId).eq('status', 'active').maybeSingle(),
           ]);
+
+        // Logged, but deliberately NOT fatal. These stats are decorative — the
+        // only place they render is the account-picker subtitle ("N messages ·
+        // N documents · N recipients") plus the release_active badge. Failing
+        // the endpoint over them is far more damaging than a stale count:
+        // AuthContext.resolveMembership drives post-sign-in routing and sets
+        // its retry guard *before* its try block, so one rejection strands the
+        // user on the sign-in page for the rest of the session with no retry.
+        //
+        // The duplicate-row case that would make the release_plans maybeSingle()
+        // error is now prevented structurally by release_plans_one_in_flight_uniq
+        // (db/constraints.sql) rather than by failing the request here.
+        const failed =
+          messagesRes.error ??
+          documentsRes.error ??
+          recipientsRes.error ??
+          activePlanRes.error;
+        if (failed) {
+          this.logger.error(
+            `Failed to fetch owner stats for ${ownerId} — serving partial stats`,
+            failed,
+          );
+        }
+
+        const { count: messages } = messagesRes;
+        const { count: documents } = documentsRes;
+        const { count: recipients } = recipientsRes;
+        const { data: activePlan } = activePlanRes;
 
         map.set(ownerId, {
           messages: messages ?? 0,
@@ -137,12 +168,16 @@ export class MembershipsService {
       ? `user_id.eq.${userId},invite_email.eq.${email.toLowerCase()}`
       : `user_id.eq.${userId}`;
 
+    // Terminal statuses must not count: a revoked or declined invitation would
+    // otherwise report has_pending_invite: true and wrongly skip the owner
+    // onboarding wizard for someone with no live membership at all.
     const { data } = await this.supabase
       .getClient()
       .from('account_memberships')
       .select('id')
       .or(filter)
       .neq('role', 'owner')
+      .not('status', 'in', '("revoked","declined")')
       .limit(1)
       .maybeSingle();
 

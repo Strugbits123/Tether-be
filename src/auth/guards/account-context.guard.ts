@@ -23,6 +23,9 @@ export class AccountContextGuard implements CanActivate {
     const userId = request.user.id;
 
     if (!membershipId) {
+      // Same status restriction as the explicit-header path below — otherwise a
+      // revoked or otherwise inactive owner membership keeps full access simply
+      // by omitting the x-account-context header.
       const { data } = await this.supabase
         .getClient()
         .from('account_memberships')
@@ -30,6 +33,7 @@ export class AccountContextGuard implements CanActivate {
         .eq('user_id', userId)
         .eq('account_owner_id', userId)
         .eq('role', 'owner')
+        .in('status', ['active', 'accepted'])
         .single();
 
       if (data) {

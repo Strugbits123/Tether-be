@@ -44,18 +44,25 @@ export class ResendWebhookService {
       return;
     }
 
-    // Resend can redeliver the same webhook event — without this, a replay
-    // would re-run the release_managers/guardians update and re-log activity.
-    if (log.status === 'bounced') {
-      return;
-    }
-
     const bounceReason = data.bounce?.message ?? data.bounce?.type ?? 'Email bounced';
 
-    await this.notificationLog.updateStatus(log.id, 'bounced', {
-      bounced_at: new Date().toISOString(),
-      error_message: bounceReason,
-    });
+    // Resend can redeliver the same webhook event, and a plain
+    // read-status-then-update would let two concurrent deliveries both observe
+    // 'sent' and both re-run the release_managers/guardians update and re-log
+    // activity. Claim the transition atomically and let only the winner
+    // continue; a replay (or the loser of the race) is a no-op.
+    const claimed = await this.notificationLog.claimStatusTransition(
+      log.id,
+      'bounced',
+      {
+        bounced_at: new Date().toISOString(),
+        error_message: bounceReason,
+      },
+    );
+
+    if (!claimed) {
+      return;
+    }
 
     const metadata = (log.metadata ?? {}) as Record<string, unknown>;
     const ownerId = (metadata.account_owner_id as string) ?? null;

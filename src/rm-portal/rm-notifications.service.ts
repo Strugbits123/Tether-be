@@ -54,13 +54,15 @@ export class RmNotificationsService {
       id: a.id,
       source: 'system' as const,
       category: a.category ?? null,
-      title: 'Tether',
+      // The per-announcement title, falling back to the brand only when the
+      // row has none — this was selected above but previously discarded.
+      title: a.title ?? 'Tether',
       message: a.message,
       is_read: readMap.get(a.id) ?? false,
       created_at: a.start_date,
     }));
 
-    const { data: activityRows } = await this.supabase
+    const { data: activityRows, error: activityError } = await this.supabase
       .getClient()
       .from('activity_log')
       .select('id, event_type, event_label, created_at')
@@ -68,6 +70,16 @@ export class RmNotificationsService {
       .in('event_type', ['invitation_accepted', 'guardian_escalation', 'release_cancelled'])
       .order('created_at', { ascending: false })
       .limit(20);
+
+    // Surfaced like the two queries above — otherwise a real failure is
+    // indistinguishable from "no activity" via the `?? []` fallback below.
+    if (activityError) {
+      this.logger.error(
+        `Failed to fetch activity notifications: ${activityError.message}`,
+        activityError,
+      );
+      throw new InternalServerErrorException('Failed to fetch activity notifications.');
+    }
 
     for (const a of activityRows ?? []) {
       merged.push({

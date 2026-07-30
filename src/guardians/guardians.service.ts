@@ -54,9 +54,29 @@ export class GuardiansService {
   }
 
   async create(data: CreateGuardianData) {
-    const count = await this.countActiveByOwner(data.accountId);
-    if (count >= 3) {
+    const email = data.email.toLowerCase();
+    const active = await this.findActiveByOwner(data.accountId);
+    const reactivating = active.some((g) => g.email === email);
+
+    // Only a genuinely new guardian consumes a slot. Without the
+    // `reactivating` check, re-designating one of three existing actives (which
+    // the upsert below merely updates) was rejected as over the limit.
+    if (!reactivating && active.length >= 3) {
       throw new ConflictException('Maximum of 3 Guardians already designated.');
+    }
+
+    // priority_order arrives from the client (InviteGuardianDto.guardianOrder),
+    // so reject a slot another active guardian already holds. This is a
+    // best-effort pre-check, not a race-free guarantee — see the note on
+    // concurrent designation below.
+    if (
+      active.some(
+        (g) => g.priority_order === data.priorityOrder && g.email !== email,
+      )
+    ) {
+      throw new ConflictException(
+        `Guardian slot ${data.priorityOrder} is already taken.`,
+      );
     }
 
     // `guardians` has a unique (account_id, email) constraint, and revoking a
@@ -73,7 +93,7 @@ export class GuardiansService {
           account_id: data.accountId,
           guardian_user_id: data.userId ?? null,
           name: data.name,
-          email: data.email.toLowerCase(),
+          email,
           relationship: data.relationship,
           priority_order: data.priorityOrder,
           status: 'invited',
@@ -145,7 +165,7 @@ export class GuardiansService {
   }
 
   async markBounced(guardianId: string) {
-    await this.supabase
+    const { error } = await this.supabase
       .getClient()
       .from('guardians')
       .update({
@@ -154,5 +174,12 @@ export class GuardiansService {
         updated_at: new Date().toISOString(),
       })
       .eq('id', guardianId);
+
+    // Surfaced rather than swallowed: the bounce webhook would otherwise mark
+    // the notification handled while the guardian row stays 'invited', and the
+    // discrepancy would leave no trace.
+    if (error) {
+      throw new InternalServerErrorException('Failed to mark Guardian bounced.');
+    }
   }
 }

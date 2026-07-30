@@ -298,14 +298,11 @@ export class RmPortalService {
       );
     }
 
-    await this.notificationLog.logEmailSent({
-      recipientEmail: newEmail,
-      emailType: 'recipient_notification',
-      resendMessageId: messageId,
-      metadata: { account_owner_id: accountOwnerId, release_plan_id: activePlan.id, recipient_id: recipientId },
-    });
-
-    await this.supabase
+    // The email has now been sent — an irreversible external side effect. Move
+    // the row off 'bounced' immediately, before any other bookkeeping, so a
+    // failure below can't leave the delivery looking retryable and invite a
+    // duplicate send when the client retries after a 500.
+    const { error: statusError } = await this.supabase
       .getClient()
       .from('recipient_delivery_status')
       .update({
@@ -315,25 +312,50 @@ export class RmPortalService {
       })
       .eq('id', deliveryRow.id);
 
-    await this.supabase
-      .getClient()
-      .from('recipients')
-      .update({ email: newEmail, updated_at: new Date().toISOString() })
-      .eq('id', recipientId);
+    if (statusError) {
+      // Deliberately not a 500: the email did go out, and reporting failure
+      // here is what would trigger the duplicate retry. Loudly logged instead.
+      this.logger.error(
+        `Delivery email resent to ${newEmail} but recipient_delivery_status ${deliveryRow.id} was not updated — retry state may be stale`,
+        statusError,
+      );
+    }
 
-    await this.supabase.getClient().from('release_plan_activity_log').insert({
-      release_plan_id: activePlan.id,
-      event_type: 'delivery_email_retried',
-      event_label: `Delivery email resent to ${recipient?.name ?? 'recipient'} at ${newEmail}`,
-      actor_role: 'release_manager',
-    });
+    // Everything past this point is bookkeeping. None of it is worth failing
+    // the request over now that the send has happened and been recorded.
+    try {
+      await this.notificationLog.logEmailSent({
+        recipientEmail: newEmail,
+        emailType: 'recipient_notification',
+        resendMessageId: messageId,
+        metadata: { account_owner_id: accountOwnerId, release_plan_id: activePlan.id, recipient_id: recipientId },
+      });
 
-    this.activityService.log(
-      accountOwnerId,
-      'delivery_email_retried',
-      `Delivery email resent — ${recipient?.name ?? 'recipient'}`,
-      { recipientId, newEmail },
-    );
+      await this.supabase
+        .getClient()
+        .from('recipients')
+        .update({ email: newEmail, updated_at: new Date().toISOString() })
+        .eq('id', recipientId);
+
+      await this.supabase.getClient().from('release_plan_activity_log').insert({
+        release_plan_id: activePlan.id,
+        event_type: 'delivery_email_retried',
+        event_label: `Delivery email resent to ${recipient?.name ?? 'recipient'} at ${newEmail}`,
+        actor_role: 'release_manager',
+      });
+
+      this.activityService.log(
+        accountOwnerId,
+        'delivery_email_retried',
+        `Delivery email resent — ${recipient?.name ?? 'recipient'}`,
+        { recipientId, newEmail },
+      );
+    } catch (err) {
+      this.logger.error(
+        `Post-send bookkeeping failed after resending delivery email to ${newEmail}`,
+        err,
+      );
+    }
 
     return {
       message: `Delivery email resent to ${newEmail}`,

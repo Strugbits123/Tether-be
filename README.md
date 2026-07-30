@@ -404,8 +404,10 @@ POST /webhooks/supabase-auth  # Supabase auth DB webhook (shared-secret verified
 POST /webhooks/resend         # Resend email events (Svix-signature verified). Handles
                                # email.delivered / .bounced / .opened, updates
                                # notification_log, and marks the corresponding RM/guardian
-                               # record `bounced`. Idempotent against replayed events
-                               # (checks the log row isn't already `bounced` first).
+                               # record `bounced`. Idempotent against replayed events:
+                               # the transition to `bounced` is claimed with a
+                               # conditional update + RETURNING, so concurrent
+                               # redeliveries can't both run the side effects.
 ```
 
 ### System
@@ -423,9 +425,16 @@ GET /health
   first, then syncs to `release_managers` via a best-effort side call, and
   simply 409s instead of replacing if an RM already exists). If both are ever
   used interchangeably, the two tables can drift out of sync.
-- **`DELETE /invitations/:id`** cascades to the `guardians` table on revoke but
-  not to `release_managers`/`recipients` for those roles — a bug, not a design
-  choice; worth fixing before that endpoint sees real traffic.
+- **`DELETE /invitations/:id`** now mirrors the revoke to all three role tables
+  (`guardians` soft-revoke, `release_managers` status update, `recipients` row
+  removal), matching the endpoint list above — this entry previously claimed
+  only `guardians` was handled, which no longer matches the code. Two caveats
+  remain: the mirror writes are not in a transaction with the membership
+  update, and the `recipients` branch is a hard `DELETE` while every other role
+  soft-revokes. Because `content_assignments.recipient_id` is a foreign key to
+  `recipients.id`, that delete is entangled with owner-authored assignments —
+  it now surfaces an error rather than reporting false success, but a proper
+  soft-revoke (a `recipients` status value plus list filtering) is still owed.
 
 ## Database
 

@@ -153,6 +153,12 @@ export class AccessService {
       )
       .eq('user_id', ownerId)
       .not('status', 'in', '("revoked","declined")')
+      // setReleaseManager revokes and inserts without a transaction, so a
+      // partial failure or concurrent call can leave two non-revoked rows. A
+      // bare maybeSingle() would then error on every subsequent read and make
+      // GET /access/overview a permanent 500 — take the newest instead.
+      .order('created_at', { ascending: false })
+      .limit(1)
       .maybeSingle();
 
     if (error) {
@@ -658,7 +664,7 @@ export class AccessService {
       userId,
     });
 
-    await this.upsertMembership({
+    const membership = await this.upsertMembership({
       userId,
       ownerId,
       role: 'guardian',
@@ -668,7 +674,10 @@ export class AccessService {
     });
 
     const rm = await this.getActiveReleaseManager(ownerId);
-    const acceptUrl = `${this.frontendUrl}/invitations/accept/${guardian.invitation_token}`;
+    // The membership token, not guardians.invitation_token: acceptInvitation
+    // resolves the URL against account_memberships.invitation_token, so the
+    // guardians-table token would never match and every accept link 404s.
+    const acceptUrl = `${this.frontendUrl}/invitations/accept/${membership.invitation_token}`;
     const messageId = await this.emailService
       .sendGuardianInvitation({
         to: recipient.email,
@@ -869,7 +878,12 @@ export class AccessService {
       throw new BadRequestException('This Release Manager has already responded.');
     }
 
-    const alreadySent = await this.notificationLog.wasSentRecently(rm.email, 'rm_reminder', 24);
+    const alreadySent = await this.notificationLog.wasSentRecently(
+      rm.email,
+      'rm_reminder',
+      24,
+      ownerId,
+    );
     if (alreadySent) {
       throw new HttpException(
         'A reminder was already sent to this Release Manager in the last 24 hours.',

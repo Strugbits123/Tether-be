@@ -21,11 +21,15 @@ export class SignupDto {
 
   // Set when signup was reached via an invitation link
   // (`/auth/signup?invite_token=...`). The actual acceptance happens
-  // client-side (AuthContext.finalizePendingInvite) once a session exists —
-  // this is accepted here only so the whitelist validator doesn't reject the
-  // request; it isn't currently read server-side.
+  // client-side (AuthContext.finalizePendingInvite) once a session exists.
+  //
+  // Server-side this is only ever used *after* verification — see
+  // AuthService.hasPendingInvitation, which requires the token to match a
+  // still-pending membership addressed to this same email before owner
+  // self-membership creation is skipped. Never branch on the raw value.
   @IsOptional()
   @IsString()
+  @MaxLength(255)
   invite_token?: string;
 
   // Acquisition attribution — collected client-side (landing URL + referrer)

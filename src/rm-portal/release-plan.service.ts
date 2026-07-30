@@ -160,13 +160,11 @@ export class ReleasePlanService {
 
     if ((pendingNotifications ?? 0) > 0) return 2;
 
-    const now = Date.now();
-    const scheduledAt = plan.delivery_scheduled_at
-      ? new Date(plan.delivery_scheduled_at).getTime()
-      : null;
-
-    if (scheduledAt && now < scheduledAt) return 3;
-    return 3; // waiting period elapsed but not yet manually advanced — still step 3
+    // Step 3 is terminal until the RM manually advances, both during the
+    // waiting period and after it elapses. There was previously a
+    // `now < scheduledAt` branch here, but both sides returned 3 — the schedule
+    // deliberately doesn't auto-advance, so the comparison was inert.
+    return 3;
   }
 
   private async buildStep2(plan: any) {
@@ -197,8 +195,23 @@ export class ReleasePlanService {
     const initiatedAt = new Date(plan.initiated_at).getTime();
     const scheduledAt = new Date(plan.delivery_scheduled_at).getTime();
     const now = Date.now();
-
     const daysTotal = WAITING_PERIOD_BUSINESS_DAYS;
+
+    // Either timestamp being null/malformed yields NaN, which would silently
+    // collapse days_elapsed to 0 and pin is_complete/can_continue to false
+    // forever. Return a neutral payload instead of nonsense.
+    if (Number.isNaN(initiatedAt) || Number.isNaN(scheduledAt)) {
+      return {
+        window_opened: plan.initiated_at ?? null,
+        delivery_scheduled: plan.delivery_scheduled_at ?? null,
+        days_elapsed: 0,
+        days_total: daysTotal,
+        cancellations_received: 0,
+        is_complete: false,
+        can_continue: false,
+      };
+    }
+
     const elapsedMs = Math.min(now, scheduledAt) - initiatedAt;
     const totalMs = scheduledAt - initiatedAt;
     const daysElapsed = totalMs > 0 ? Math.round((elapsedMs / totalMs) * daysTotal) : 0;
@@ -527,7 +540,11 @@ export class ReleasePlanService {
   }
 
   private async cancelPlan(plan: any, reason: string, cancelledBy: 'release_manager' | 'account_owner') {
-    const { error } = await this.supabase
+    // Conditional on status = 'active', mirroring continueDelivery: both
+    // cancelRelease and cancelByToken read the plan and then update, so two
+    // concurrent cancels (or one racing continueDelivery) would otherwise both
+    // proceed and double-send cancellation emails plus duplicate the log row.
+    const { data: cancelledRows, error } = await this.supabase
       .getClient()
       .from('release_plans')
       .update({
@@ -536,11 +553,17 @@ export class ReleasePlanService {
         cancelled_by: cancelledBy,
         updated_at: new Date().toISOString(),
       })
-      .eq('id', plan.id);
+      .eq('id', plan.id)
+      .eq('status', 'active')
+      .select('id');
 
     if (error) {
       throw new InternalServerErrorException('Failed to cancel release plan.');
     }
+
+    // Another caller won the race and already cancelled — don't fire the side
+    // effects a second time.
+    if (!cancelledRows?.length) return;
 
     await this.logReleaseEvent(
       plan.id,
@@ -953,7 +976,26 @@ td{border-bottom:1px solid #eee;padding:6px 8px}
       throw new InternalServerErrorException('Failed to request guardian escalation.');
     }
 
-    const acceptUrl = `${this.frontendUrl}/invitations/accept/${guardian.invitation_token}`;
+    // Resolved from account_memberships, not guardians.invitation_token —
+    // acceptInvitation matches the membership token, and interpolating a
+    // consumed/cleared guardians token would produce `/accept/null`. Falls back
+    // to the portal when there's no live invitation left to accept.
+    const { data: guardianMembership } = await this.supabase
+      .getClient()
+      .from('account_memberships')
+      .select('invitation_token')
+      .eq('account_owner_id', accountOwnerId)
+      .eq('role', 'guardian')
+      .eq('invite_email', guardian.email.toLowerCase())
+      .not('status', 'in', '("revoked","declined")')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const acceptUrl = guardianMembership?.invitation_token
+      ? `${this.frontendUrl}/invitations/accept/${guardianMembership.invitation_token}`
+      : `${this.frontendUrl}/rm/release-plan`;
+
     const messageId = await this.emailService
       .sendGuardianEscalation({
         to: guardian.email,
@@ -999,7 +1041,9 @@ td{border-bottom:1px solid #eee;padding:6px 8px}
       id: escalation.id,
       guardian_notified: guardian.name,
       guardian_order: guardian.priority_order,
-      message: `Guardian ${guardian.priority_order} has been notified via email and text.`,
+      // Email only — this path sends no SMS (contrast continueDelivery, which
+      // does call smsService). Don't promise a channel we didn't use.
+      message: `Guardian ${guardian.priority_order} has been notified via email.`,
     };
   }
 

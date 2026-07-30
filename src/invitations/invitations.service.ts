@@ -2,6 +2,8 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  HttpException,
+  HttpStatus,
   Injectable,
   InternalServerErrorException,
   Logger,
@@ -111,14 +113,26 @@ export class InvitationsService {
     const owner = await this.getOwner(ownerId);
     if (!owner) throw new NotFoundException('Account owner not found');
 
-    const { data: existingActiveRm } = await this.supabase
+    // limit(1) matters: maybeSingle() returns an *error* (not data) when more
+    // than one row matches, so discarding the error would leave
+    // existingActiveRm undefined in exactly the case where the account already
+    // has multiple active Release Managers — silently disabling this guard.
+    const { data: existingActiveRm, error: rmLookupError } = await this.supabase
       .getClient()
       .from('account_memberships')
       .select('id')
       .eq('account_owner_id', ownerId)
       .eq('role', 'release_manager')
       .not('status', 'in', '("revoked","declined")')
+      .limit(1)
       .maybeSingle();
+
+    // Fail closed rather than risk designating a second active RM.
+    if (rmLookupError) {
+      throw new InternalServerErrorException(
+        'Failed to check for an existing Release Manager.',
+      );
+    }
 
     if (existingActiveRm) {
       throw new ConflictException(
@@ -191,7 +205,7 @@ export class InvitationsService {
       ownerId,
       'release_manager_invited',
       `Release Manager invited — ${dto.name}`,
-      { membershipId: membership.id, email, relationship: dto.relationship },
+      { membershipId: membership.id, relationship: dto.relationship },
     );
     this.posthog.capture(ownerId, 'release_manager_invited', {
       relationship: dto.relationship,
@@ -286,7 +300,7 @@ export class InvitationsService {
       ownerId,
       'guardian_invited',
       `Guardian invited — ${dto.name}`,
-      { guardianId: guardian.id, membershipId: membership.id, email, priorityOrder },
+      { guardianId: guardian.id, membershipId: membership.id, priorityOrder },
     );
     this.posthog.capture(ownerId, 'guardian_invited', {
       relationship: dto.relationship,
@@ -310,6 +324,33 @@ export class InvitationsService {
     const email = dto.email.toLowerCase();
     const owner = await this.getOwner(ownerId);
     if (!owner) throw new NotFoundException('Account owner not found');
+
+    // Without this, inviting the same address twice creates two pending rows
+    // with two live tokens — and revokeInvitation only revokes the id it is
+    // given, leaving the other token acceptable indefinitely.
+    const { data: existingInvite, error: existingInviteError } =
+      await this.supabase
+        .getClient()
+        .from('account_memberships')
+        .select('id')
+        .eq('account_owner_id', ownerId)
+        .eq('role', 'recipient')
+        .eq('invite_email', email)
+        .not('status', 'in', '("revoked","declined")')
+        .limit(1)
+        .maybeSingle();
+
+    if (existingInviteError) {
+      throw new InternalServerErrorException(
+        'Failed to check for an existing recipient invitation.',
+      );
+    }
+
+    if (existingInvite) {
+      throw new ConflictException(
+        'This person has already been added as a recipient.',
+      );
+    }
 
     const userId = await this.findExistingUserId(email);
 
@@ -370,7 +411,7 @@ export class InvitationsService {
       ownerId,
       'recipient_invited',
       `Recipient added — ${dto.name}`,
-      { membershipId: membership.id, email, relationship: dto.relationship },
+      { membershipId: membership.id, relationship: dto.relationship },
     );
     this.posthog.capture(ownerId, 'recipient_added', {
       relationship: dto.relationship,
@@ -538,12 +579,29 @@ export class InvitationsService {
     const owner = await this.getOwner(ownerId);
     if (!owner) throw new NotFoundException('Account owner not found');
 
+    // Unbounded resends would let an owner mail an arbitrary third-party
+    // address in a loop. Scoped to this owner so the same invitee can still be
+    // reminded independently by another account.
+    const recentlyResent = await this.notificationLog.wasSentRecently(
+      membership.invite_email,
+      'invitation_resend',
+      1,
+      ownerId,
+    );
+    if (recentlyResent) {
+      throw new HttpException(
+        'This invitation was already resent in the last hour.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
     const acceptUrl = `${this.frontendUrl}/invitations/accept/${membership.invitation_token}`;
 
     // Best-effort, like every other invitation email in this service — a
     // transient Resend error shouldn't fail the whole resend request.
+    let messageId: string | null = null;
     if (membership.role === 'release_manager') {
-      await this.emailService
+      messageId = await this.emailService
         .sendReleaseManagerInvitation({
           to: membership.invite_email,
           rmName: membership.invite_name,
@@ -553,13 +611,14 @@ export class InvitationsService {
         })
         .catch((err) => {
           this.logger.error('Failed to resend RM invitation email', err);
+          return null;
         });
     } else if (membership.role === 'guardian') {
       const guardian = await this.guardiansService.findByEmail(
         ownerId,
         membership.invite_email,
       );
-      await this.emailService
+      messageId = await this.emailService
         .sendGuardianInvitation({
           to: membership.invite_email,
           guardianName: membership.invite_name,
@@ -570,9 +629,10 @@ export class InvitationsService {
         })
         .catch((err) => {
           this.logger.error('Failed to resend guardian invitation email', err);
+          return null;
         });
     } else {
-      await this.emailService
+      messageId = await this.emailService
         .sendRecipientNotification({
           to: membership.invite_email,
           recipientName: membership.invite_name,
@@ -581,8 +641,24 @@ export class InvitationsService {
         })
         .catch((err) => {
           this.logger.error('Failed to resend recipient notification email', err);
+          return null;
         });
     }
+
+    // Resends were previously invisible to the webhook bounce/delivery
+    // correlation that initial sends rely on, and to the rate-limit window
+    // above. Logged after the send so a failed attempt isn't recorded as sent.
+    await this.notificationLog.logEmailSent({
+      userId: null,
+      recipientEmail: membership.invite_email,
+      emailType: 'invitation_resend',
+      resendMessageId: messageId,
+      metadata: {
+        account_owner_id: ownerId,
+        role: membership.role,
+        membership_id: membership.id,
+      },
+    });
 
     await this.supabase
       .getClient()
@@ -631,13 +707,26 @@ export class InvitationsService {
       // The recipients table has no soft-revoke status in active use — mirror
       // the guardian-invite rollback pattern by removing the synced row
       // rather than leaving it referencing a revoked invitation.
+      //
+      // NOTE: content_assignments.recipient_id is a foreign key to
+      // recipients.id, so this delete is entangled with owner-authored
+      // assignments — depending on the FK's ON DELETE rule it either removes
+      // them or fails outright. Deliberately surfaced rather than logged-and-
+      // ignored: previously either outcome still returned `revoked: true`,
+      // reporting success while the mirror row survived. A proper soft-revoke
+      // needs a recipients status value plus list-filtering, tracked separately.
       const { error: recipientError } = await this.supabase
         .getClient()
         .from('recipients')
         .delete()
         .eq('user_id', ownerId)
         .eq('email', data.invite_email.toLowerCase());
-      if (recipientError) this.logger.error('Failed to remove recipients row', recipientError);
+      if (recipientError) {
+        this.logger.error('Failed to remove recipients row', recipientError);
+        throw new InternalServerErrorException(
+          'Invitation was revoked but the recipient record could not be removed.',
+        );
+      }
     }
 
     return { id: membershipId, revoked: true };

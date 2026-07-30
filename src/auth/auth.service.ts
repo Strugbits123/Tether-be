@@ -27,6 +27,42 @@ export class AuthService {
     private readonly analytics: AnalyticsService,
   ) {}
 
+  /**
+   * True only when `token` names a still-pending invitation addressed to
+   * `email`. Used to decide whether to skip creating an owner self-membership,
+   * so an unverified client-supplied token can't strand an account without one.
+   *
+   * Fails closed (returns false → the self-membership IS created): an account
+   * with a redundant owner membership is recoverable, one with none is not.
+   */
+  private async hasPendingInvitation(
+    token: string | undefined,
+    email: string,
+  ): Promise<boolean> {
+    if (!token) return false;
+
+    try {
+      const { data, error } = await this.supabase
+        .getClient()
+        .from('account_memberships')
+        .select('id')
+        .eq('invitation_token', token)
+        .eq('invite_email', email.toLowerCase())
+        .eq('status', 'pending')
+        .limit(1)
+        .maybeSingle();
+
+      if (error) {
+        this.logger.error('Failed to verify signup invite token', error);
+        return false;
+      }
+      return Boolean(data);
+    } catch (e) {
+      this.logger.error('Failed to verify signup invite token', e);
+      return false;
+    }
+  }
+
   async signup(dto: SignupDto) {
     // Pre-flight: check if this email already has a row in public.users.
     // This catches cases where a Google-OAuth user later attempts an
@@ -89,25 +125,46 @@ export class AuthService {
       // resolves without a separate onboarding step. Best-effort: a missing row
       // here is recoverable via the backfill query, never worth failing signup.
       //
-      // Skipped when signing up via an invitation: that person is joining
-      // purely as a Release Manager/Guardian/Recipient and shouldn't be handed
-      // their own owner account (and the owner onboarding wizard) unless they
-      // explicitly choose to via "Create my Tether" later.
-      if (!dto.invite_token) {
-        await this.supabase
-          .getClient()
-          .from('account_memberships')
-          .insert({
-            user_id: data.user.id,
-            account_owner_id: data.user.id,
-            role: 'owner',
-            status: 'active',
-          })
-          .then(({ error }) => {
-            if (error) {
-              this.logger.error('Failed to create owner self-membership', error);
-            }
-          });
+      // Skipped when signing up via a *verified* invitation: that person is
+      // joining purely as a Release Manager/Guardian/Recipient and shouldn't be
+      // handed their own owner account (and the owner onboarding wizard) unless
+      // they explicitly choose to via "Create my Tether" later.
+      //
+      // The token must be verified server-side. Trusting the raw field would
+      // let any client suppress its own owner membership by sending an
+      // arbitrary value, leaving an account that can't resolve a default
+      // context (AccountContextGuard then rejects every request).
+      const joiningByInvite = await this.hasPendingInvitation(
+        dto.invite_token,
+        dto.email,
+      );
+
+      if (!joiningByInvite) {
+        // Best-effort: a missing row here is recoverable via the backfill
+        // query, never worth failing a signup whose auth user already exists.
+        // try/catch, not .then() — a rejected promise (transient network/DB
+        // failure) would otherwise propagate and surface as a failed signup
+        // that then retries into "already registered".
+        try {
+          const { error: membershipError } = await this.supabase
+            .getClient()
+            .from('account_memberships')
+            .insert({
+              user_id: data.user.id,
+              account_owner_id: data.user.id,
+              role: 'owner',
+              status: 'active',
+            });
+
+          if (membershipError) {
+            this.logger.error(
+              'Failed to create owner self-membership',
+              membershipError,
+            );
+          }
+        } catch (e) {
+          this.logger.error('Failed to create owner self-membership', e);
+        }
       }
 
       this.posthog.capture(data.user.id, 'account_created', {

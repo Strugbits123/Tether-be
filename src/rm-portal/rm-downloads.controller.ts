@@ -21,17 +21,18 @@ export class RmDownloadsController {
 
   @Post('prepare')
   async prepare(@Request() req: any, @Body() dto: PrepareDownloadDto, @Res() res: Response) {
-    const { archive, filename } = await this.rmDownloadsService.prepareDownload(
-      req.accountContext.accountOwnerId,
-      dto,
-    );
+    const { archive, filename, populate } =
+      await this.rmDownloadsService.prepareDownload(
+        req.accountContext.accountOwnerId,
+        dto,
+      );
 
-    res.set({
-      'Content-Type': 'application/zip',
-      'Content-Disposition': `attachment; filename="${filename}"`,
-    });
+    res.set({ 'Content-Type': 'application/zip' });
+    res.attachment(filename);
 
+    let streamFailed = false;
     archive.on('error', (err: Error) => {
+      streamFailed = true;
       this.logger.error('Archive stream failed while preparing download', err);
       if (!res.headersSent) {
         res.status(500);
@@ -39,7 +40,24 @@ export class RmDownloadsController {
       res.end();
     });
 
+    // Pipe before populating so entries stream to the client as they're
+    // compressed, instead of accumulating in memory with nothing draining them.
     archive.pipe(res);
-    await archive.finalize();
+
+    // Both of these can reject after the response is already streaming, where
+    // there's no way to change the status code — log and close rather than let
+    // the rejection escape this handler as an unhandled promise rejection.
+    try {
+      await populate();
+      await archive.finalize();
+    } catch (err) {
+      if (!streamFailed) {
+        this.logger.error('Failed to build download archive', err);
+        if (!res.headersSent) {
+          res.status(500);
+        }
+        res.end();
+      }
+    }
   }
 }
