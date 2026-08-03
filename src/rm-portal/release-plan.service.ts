@@ -326,6 +326,20 @@ export class ReleasePlanService {
 
     const rm = await this.getRmRecord(accountOwnerId, rmUserId);
 
+    // release_plans carries a `valid_initiator` check constraint: when
+    // initiator_role is 'release_manager', initiator_rm_id must be non-null
+    // (and likewise initiator_guardian_id for 'guardian'). Passing
+    // `rm?.id ?? null` therefore fails the insert with an opaque 500 whenever
+    // the release_managers row can't be resolved — e.g. an RM who accepted
+    // their membership but whose rm_user_id was never linked. Fail fast with a
+    // message that says what's actually wrong.
+    if (!rm) {
+      throw new NotFoundException(
+        'No active Release Manager record is linked to your account for this owner. ' +
+          'Re-accept the invitation or contact support before initiating a release.',
+      );
+    }
+
     const initiatedAt = new Date();
     const deliveryScheduledAt = addBusinessDays(initiatedAt, WAITING_PERIOD_BUSINESS_DAYS);
     const idempotencyKey = randomUUID();
@@ -337,7 +351,7 @@ export class ReleasePlanService {
       .insert({
         user_id: accountOwnerId,
         initiator_role: 'release_manager',
-        initiator_rm_id: rm?.id ?? null,
+        initiator_rm_id: rm.id,
         reason: dto.reason,
         explanation: dto.explanation,
         confirmation_checked: true,
@@ -373,7 +387,7 @@ export class ReleasePlanService {
         );
     }
 
-    await this.logReleaseEvent(plan.id, 'release_initiated', 'Release initiated by Release Manager', 'release_manager');
+    await this.logReleaseEvent(plan.id, 'release_initiated', 'Release initiated by Release Manager', 'release_manager', accountOwnerId);
 
     // Fire-and-forget notification sending; the frontend polls
     // GET /rm/release-plan/notification-status while this runs.
@@ -680,7 +694,7 @@ export class ReleasePlanService {
       throw new ConflictException('This release plan has already been delivered.');
     }
 
-    await this.logReleaseEvent(plan.id, 'waiting_period_complete', 'Waiting period complete — no cancellation received', 'system');
+    await this.logReleaseEvent(plan.id, 'waiting_period_complete', 'Waiting period complete — no cancellation received', 'system', accountOwnerId);
 
     const owner = await this.getOwner(accountOwnerId);
     const { data: deliveryRows } = await this.supabase
@@ -745,7 +759,7 @@ export class ReleasePlanService {
       notified++;
     }
 
-    await this.logReleaseEvent(plan.id, 'content_delivered', 'Content delivered to all recipients', 'system');
+    await this.logReleaseEvent(plan.id, 'content_delivered', 'Content delivered to all recipients', 'system', accountOwnerId);
 
     this.posthog.capture(accountOwnerId, 'server_release_delivered', {
       planId: plan.id,
@@ -1052,13 +1066,46 @@ td{border-bottom:1px solid #eee;padding:6px 8px}
     eventType: string,
     eventLabel: string,
     actorRole: string,
+    userId?: string,
   ) {
-    await this.supabase.getClient().from('release_plan_activity_log').insert({
-      release_plan_id: releasePlanId,
-      event_type: eventType,
-      event_label: eventLabel,
-      actor_role: actorRole,
-    });
+    // release_plan_activity_log.user_id is NOT NULL and identifies the account
+    // owner the plan belongs to — actor_role separately records who acted. It
+    // was omitted entirely before, so every insert failed the not-null check;
+    // because the result was never inspected, the failure was silent and the
+    // activity log stayed permanently empty (taking the activity report PDF and
+    // buildStep3's cancellation count with it).
+    let ownerId = userId;
+    if (!ownerId) {
+      const { data } = await this.supabase
+        .getClient()
+        .from('release_plans')
+        .select('user_id')
+        .eq('id', releasePlanId)
+        .maybeSingle();
+      ownerId = (data as { user_id: string } | null)?.user_id;
+    }
+
+    if (!ownerId) {
+      this.logger.error(
+        `Cannot log release event '${eventType}': no owner resolved for plan ${releasePlanId}`,
+      );
+      return;
+    }
+
+    const { error } = await this.supabase
+      .getClient()
+      .from('release_plan_activity_log')
+      .insert({
+        release_plan_id: releasePlanId,
+        user_id: ownerId,
+        event_type: eventType,
+        event_label: eventLabel,
+        actor_role: actorRole,
+      });
+
+    if (error) {
+      this.logger.error(`Failed to log release event '${eventType}'`, error);
+    }
   }
 
   private daysSince(iso: string | null): number | null {
