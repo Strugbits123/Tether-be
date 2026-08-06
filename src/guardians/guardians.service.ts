@@ -8,6 +8,18 @@ import { SupabaseService } from '../shared/supabase/supabase.service.js';
 import { CreateGuardianData } from './dto/create-guardian.dto.js';
 
 const NON_TERMINAL_FILTER = '("revoked","declined","bounced")';
+
+// Single source of truth for the guardian cap. Also surfaced to the frontend as
+// stats.max_guardians (access.service.ts) so the UI greys out its designate
+// button from the same number, and mirrored by the @IsIn on the two guardian
+// DTOs' priority/order fields.
+export const MAX_GUARDIANS = 2;
+
+// Shown verbatim to the account owner when they try to exceed the cap, so it
+// reads as product copy rather than a validation string. Update alongside
+// MAX_GUARDIANS — the number is spelled out deliberately.
+export const MAX_GUARDIANS_MESSAGE =
+  'You have already selected two Guardians.';
 const GUARDIAN_COLUMNS =
   'id, account_id, guardian_user_id, name, email, relationship, status, invitation_token, invitation_sent_at, accepted_at, declined_at, revoked_at, priority_order, created_at';
 
@@ -47,10 +59,10 @@ export class GuardiansService {
   async nextPriorityOrder(ownerId: string): Promise<number> {
     const existing = await this.findActiveByOwner(ownerId);
     const taken = new Set(existing.map((g) => g.priority_order));
-    for (let order = 1; order <= 3; order++) {
+    for (let order = 1; order <= MAX_GUARDIANS; order++) {
       if (!taken.has(order)) return order;
     }
-    throw new ConflictException('Maximum of 3 Guardians already designated.');
+    throw new ConflictException(MAX_GUARDIANS_MESSAGE);
   }
 
   async create(data: CreateGuardianData) {
@@ -59,10 +71,10 @@ export class GuardiansService {
     const reactivating = active.some((g) => g.email === email);
 
     // Only a genuinely new guardian consumes a slot. Without the
-    // `reactivating` check, re-designating one of three existing actives (which
-    // the upsert below merely updates) was rejected as over the limit.
-    if (!reactivating && active.length >= 3) {
-      throw new ConflictException('Maximum of 3 Guardians already designated.');
+    // `reactivating` check, re-designating an existing active guardian (which the
+    // upsert below merely updates) was rejected as over the limit.
+    if (!reactivating && active.length >= MAX_GUARDIANS) {
+      throw new ConflictException(MAX_GUARDIANS_MESSAGE);
     }
 
     // priority_order arrives from the client (InviteGuardianDto.guardianOrder),

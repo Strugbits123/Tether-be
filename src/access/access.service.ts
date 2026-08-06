@@ -15,7 +15,11 @@ import { EmailService } from '../shared/email/email.service.js';
 import { NotificationLogService } from '../shared/notification-log/notification-log.service.js';
 import { ActivityService } from '../activity/activity.service.js';
 import { PostHogService } from '../shared/posthog/posthog.service.js';
-import { GuardiansService } from '../guardians/guardians.service.js';
+import {
+  GuardiansService,
+  MAX_GUARDIANS,
+  MAX_GUARDIANS_MESSAGE,
+} from '../guardians/guardians.service.js';
 import { AddRecipientDto } from './dto/add-recipient.dto.js';
 import { UpdateRecipientDto } from './dto/update-recipient.dto.js';
 import { ChangeReleaseManagerDto } from './dto/change-release-manager.dto.js';
@@ -243,7 +247,7 @@ export class AccessService {
       stats: {
         total_recipients: recipientsRows.length,
         total_guardians: guardians.length,
-        max_guardians: 3,
+        max_guardians: MAX_GUARDIANS,
         has_release_manager: !!rm,
       },
       legal_disclaimer_accepted:
@@ -418,8 +422,8 @@ export class AccessService {
         throw new BadRequestException('legal_acknowledged must be true');
       }
       const guardianCount = await this.guardiansService.countActiveByOwner(ownerId);
-      if (guardianCount >= 3) {
-        throw new ConflictException('Maximum of 3 Guardians already designated.');
+      if (guardianCount >= MAX_GUARDIANS) {
+        throw new ConflictException(MAX_GUARDIANS_MESSAGE);
       }
     }
 
@@ -646,8 +650,8 @@ export class AccessService {
     dto: { priority_order?: number },
   ) {
     const count = await this.guardiansService.countActiveByOwner(ownerId);
-    if (count >= 3) {
-      throw new ConflictException('Maximum of 3 Guardians already designated.');
+    if (count >= MAX_GUARDIANS) {
+      throw new ConflictException(MAX_GUARDIANS_MESSAGE);
     }
 
     const priorityOrder =

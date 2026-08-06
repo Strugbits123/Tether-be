@@ -27,7 +27,8 @@ export class InviteGuardianDto {
   @IsEnum(InvitationRelationshipType)
   relationship: InvitationRelationshipType;
 
+  // Slots are 1..MAX_GUARDIANS (guardians.service.ts).
   @IsOptional()
-  @IsIn([1, 2, 3])
+  @IsIn([1, 2])
   guardianOrder?: number;
 }
