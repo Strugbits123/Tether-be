@@ -6,20 +6,20 @@ import {
 } from '@nestjs/common';
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
 import { CreateGuardianData } from './dto/create-guardian.dto.js';
+import {
+  MAX_GUARDIANS,
+  MAX_GUARDIANS_MESSAGE,
+} from './guardians.constants.js';
 
 const NON_TERMINAL_FILTER = '("revoked","declined","bounced")';
 
-// Single source of truth for the guardian cap. Also surfaced to the frontend as
-// stats.max_guardians (access.service.ts) so the UI greys out its designate
-// button from the same number, and mirrored by the @IsIn on the two guardian
-// DTOs' priority/order fields.
-export const MAX_GUARDIANS = 2;
-
-// Shown verbatim to the account owner when they try to exceed the cap, so it
-// reads as product copy rather than a validation string. Update alongside
-// MAX_GUARDIANS — the number is spelled out deliberately.
-export const MAX_GUARDIANS_MESSAGE =
-  'You have already selected two Guardians.';
+// Re-exported for existing importers; defined in guardians.constants.ts so the
+// validation DTOs can share them without importing this service.
+export {
+  MAX_GUARDIANS,
+  MAX_GUARDIANS_MESSAGE,
+  GUARDIAN_SLOT_VALUES,
+} from './guardians.constants.js';
 const GUARDIAN_COLUMNS =
   'id, account_id, guardian_user_id, name, email, relationship, status, invitation_token, invitation_sent_at, accepted_at, declined_at, revoked_at, priority_order, created_at';
 

@@ -8,6 +8,7 @@ import {
   MaxLength,
 } from 'class-validator';
 import { InvitationRelationshipType } from './invite-release-manager.dto.js';
+import { GUARDIAN_SLOT_VALUES } from '../../guardians/guardians.constants.js';
 
 export class InviteGuardianDto {
   @IsNotEmpty()
@@ -27,8 +28,8 @@ export class InviteGuardianDto {
   @IsEnum(InvitationRelationshipType)
   relationship: InvitationRelationshipType;
 
-  // Slots are 1..MAX_GUARDIANS (guardians.service.ts).
+  // Same shared slot values as DesignateGuardianDto.
   @IsOptional()
-  @IsIn([1, 2])
+  @IsIn(GUARDIAN_SLOT_VALUES)
   guardianOrder?: number;
 }
