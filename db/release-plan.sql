@@ -59,7 +59,26 @@ alter table public.guardian_escalations
 -- is the only one the code sets today; the rest are the intended lifecycle and
 -- are included so a follow-up doesn't need another migration.
 do $$
+declare
+  offending text;
 begin
+  -- Check BEFORE dropping. `add constraint ... check` validates existing rows,
+  -- so on an environment holding a status outside this list the add would fail
+  -- after the drop had already succeeded — leaving the table with no constraint
+  -- at all, which is worse than where it started. Fail loudly and unchanged
+  -- instead, naming the values that need attention.
+  select string_agg(distinct status, ', ')
+    into offending
+    from public.guardian_escalations
+   where status is not null
+     and status not in ('pending', 'accepted', 'declined', 'expired', 'cancelled');
+
+  if offending is not null then
+    raise exception
+      'guardian_escalations has status values outside the new check constraint: %. Reconcile these rows (or widen the list below) before re-running.',
+      offending;
+  end if;
+
   if exists (
     select 1 from pg_constraint
       where conname = 'guardian_escalations_status_check'

@@ -3,6 +3,7 @@ import {
   ForbiddenException,
   Injectable,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -53,6 +54,8 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 
 @Injectable()
 export class MessagesService {
+  private readonly logger = new Logger(MessagesService.name);
+
   constructor(
     private readonly supabase: SupabaseService,
     private readonly config: ConfigService,
@@ -578,6 +581,70 @@ export class MessagesService {
       'video',
       Math.round((data.duration as number) ?? 0),
     );
+  }
+
+  /**
+   * Caches the state of an asset's downloadable MP4 from the
+   * video.asset.static_rendition.* webhooks, so RmDownloadsService.listVideos can
+   * answer from the database instead of calling Mux once per video per page load.
+   *
+   * Only the 'highest' rendition matters — that's the one the download page
+   * serves and the only one we request. Other resolutions are ignored so a
+   * future additional rendition can't overwrite this state.
+   */
+  async handleMuxStaticRenditionEvent(
+    event: Record<string, unknown>,
+    status: 'preparing' | 'ready' | 'errored' | 'skipped',
+  ) {
+    const data = (event.data ?? {}) as Record<string, unknown>;
+
+    // For static-rendition events the parent asset arrives as data.asset_id;
+    // `object` carries it too. Read both — the payload shape has moved before.
+    const object = (event.object ?? {}) as Record<string, unknown>;
+    const assetId =
+      (data.asset_id as string | undefined) ??
+      (object.type === 'asset' ? (object.id as string | undefined) : undefined);
+
+    if (!assetId) {
+      this.logger.warn(
+        `Mux static rendition event '${event.type as string}' had no resolvable asset id`,
+      );
+      return;
+    }
+
+    const name = data.name as string | undefined;
+    const resolution = data.resolution as string | undefined;
+    if (name && name !== 'highest.mp4' && resolution !== 'highest') {
+      return; // a rendition we don't serve
+    }
+
+    // filesize is a string in the Mux payload.
+    const rawSize = data.filesize as string | number | undefined;
+    const bytes =
+      status === 'ready' && rawSize !== undefined && rawSize !== null
+        ? Number(rawSize)
+        : null;
+
+    const { error } = await this.supabase
+      .getClient()
+      .from('messages')
+      .update({
+        mux_static_rendition_status: status,
+        ...(bytes !== null && Number.isFinite(bytes)
+          ? { mux_static_rendition_bytes: bytes }
+          : {}),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('mux_asset_id', assetId);
+
+    if (error) {
+      // Not fatal: listVideos still falls back to querying Mux directly when the
+      // cached state is missing or stale.
+      this.logger.error(
+        `Failed to cache static rendition status '${status}' for asset ${assetId}`,
+        error,
+      );
+    }
   }
 
   async handleMuxAssetErrored(event: Record<string, unknown>) {

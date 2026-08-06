@@ -115,6 +115,30 @@ export class RmDownloadsService {
     });
   }
 
+  /** Mirrors what we just learned from the Mux API onto the message, so the next
+   *  listVideos call can answer from the database. Best-effort by design. */
+  private async cacheRenditionState(
+    messageId: string,
+    status: 'preparing' | 'ready' | 'errored',
+    bytes: number | null,
+  ): Promise<void> {
+    const { error } = await this.supabase
+      .getClient()
+      .from('messages')
+      .update({
+        mux_static_rendition_status: status,
+        ...(bytes !== null ? { mux_static_rendition_bytes: bytes } : {}),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', messageId);
+
+    if (error) {
+      this.logger.warn(
+        `Could not cache static rendition status for message ${messageId}: ${error.message}`,
+      );
+    }
+  }
+
   // GET /rm/downloads/videos
   //
   // Video messages live in Mux, not Supabase Storage, so they can't be added to
@@ -135,7 +159,9 @@ export class RmDownloadsService {
     const { data: messages, error } = await this.supabase
       .getClient()
       .from('messages')
-      .select('id, title, mux_asset_id, mux_playback_id, duration_seconds, created_at')
+      .select(
+        'id, title, mux_asset_id, mux_playback_id, duration_seconds, created_at, mux_static_rendition_status, mux_static_rendition_bytes',
+      )
       .eq('user_id', ownerId)
       .eq('type', 'video')
       .in('id', [...assignedIds])
@@ -170,38 +196,79 @@ export class RmDownloadsService {
         this.logger.error(`Failed to sign Mux tokens for message ${m.id}`, err);
       }
 
-      let status: 'ready' | 'preparing' | 'errored' = 'preparing';
+      // A signing failure alone must not leave the video reported as 'ready':
+      // download_url would be null while the status claimed otherwise, which is
+      // an inconsistent payload for any client to reason about. Treat it as
+      // errored regardless of what the rendition says.
+      let status: 'ready' | 'preparing' | 'errored' = downloadToken
+        ? 'preparing'
+        : 'errored';
       let fileSizeBytes: number | null = null;
 
-      try {
-        const asset = await mux.video.assets.retrieve(m.mux_asset_id as string);
-        const files = asset.static_renditions?.files ?? [];
-        const mp4 = files.find((f) => f.name === 'highest.mp4');
+      // Fast path: the static_rendition.* webhooks cache this on the message
+      // (see handleMuxStaticRenditionEvent), so a settled asset costs no Mux
+      // call at all. Only a null status — an asset predating that, or one that
+      // hasn't emitted an event yet — falls through to the API. 'preparing' also
+      // re-checks, because a webhook can be missed and we'd otherwise never
+      // notice the rendition finishing.
+      const cached = m.mux_static_rendition_status as
+        | 'preparing'
+        | 'ready'
+        | 'errored'
+        | 'skipped'
+        | null;
 
-        if (!mp4) {
-          // No rendition requested for this asset yet — request one now. Safe to
-          // attempt repeatedly: a duplicate request is rejected and swallowed,
-          // and the next poll will see it as 'preparing'.
-          try {
-            await mux.video.assets.createStaticRendition(m.mux_asset_id as string, {
-              resolution: 'highest',
-            });
-          } catch (err) {
-            this.logger.warn(
-              `Could not request a static rendition for asset ${m.mux_asset_id}: ${
-                err instanceof Error ? err.message : String(err)
-              }`,
-            );
+      if (cached === 'ready') {
+        if (downloadToken) status = 'ready';
+        fileSizeBytes = m.mux_static_rendition_bytes
+          ? Number(m.mux_static_rendition_bytes)
+          : null;
+      } else if (cached === 'errored' || cached === 'skipped') {
+        status = 'errored';
+      } else {
+        try {
+          const asset = await mux.video.assets.retrieve(m.mux_asset_id as string);
+          const files = asset.static_renditions?.files ?? [];
+          const mp4 = files.find((f) => f.name === 'highest.mp4');
+
+          if (!mp4) {
+            // No rendition requested for this asset yet — request one now. Safe
+            // to attempt repeatedly: a duplicate request is rejected and
+            // swallowed, and the next poll will see it as 'preparing'.
+            try {
+              await mux.video.assets.createStaticRendition(m.mux_asset_id as string, {
+                resolution: 'highest',
+              });
+            } catch (err) {
+              this.logger.warn(
+                `Could not request a static rendition for asset ${m.mux_asset_id}: ${
+                  err instanceof Error ? err.message : String(err)
+                }`,
+              );
+            }
+          } else if (mp4.status === 'ready') {
+            // Only 'ready' if we can also hand over a usable URL.
+            if (downloadToken) status = 'ready';
+            fileSizeBytes = mp4.filesize ? Number(mp4.filesize) : null;
+          } else if (mp4.status === 'errored' || mp4.status === 'skipped') {
+            status = 'errored';
           }
-        } else if (mp4.status === 'ready') {
-          status = 'ready';
-          fileSizeBytes = mp4.filesize ? Number(mp4.filesize) : null;
-        } else if (mp4.status === 'errored' || mp4.status === 'skipped') {
+
+          // Persist what we just learned so the next load skips this call. Best
+          // effort — a failure here only costs another lookup later.
+          await this.cacheRenditionState(
+            m.id,
+            mp4?.status === 'ready'
+              ? 'ready'
+              : mp4?.status === 'errored' || mp4?.status === 'skipped'
+                ? 'errored'
+                : 'preparing',
+            fileSizeBytes,
+          );
+        } catch (err) {
+          this.logger.error(`Failed to read Mux asset for message ${m.id}`, err);
           status = 'errored';
         }
-      } catch (err) {
-        this.logger.error(`Failed to read Mux asset for message ${m.id}`, err);
-        status = 'errored';
       }
 
       // ?download= makes the browser save rather than navigate. It matters

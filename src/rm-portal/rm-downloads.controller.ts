@@ -49,8 +49,10 @@ export class RmDownloadsController {
       // Same trap as the catch below: res.end() mid-archive completes the
       // response and yields a ZIP with no central directory that the client
       // stores as a finished download. Destroy the socket so it registers as a
-      // failed transfer instead.
-      res.destroy(err);
+      // failed transfer instead. abort() first so the archiver stops doing entry
+      // work for a response nobody is reading.
+      archive.abort();
+      if (!res.destroyed) res.destroy(err);
     });
 
     // Pipe before populating so entries stream to the client as they're
@@ -80,7 +82,9 @@ export class RmDownloadsController {
       // then rejects as invalid. Abort the archive and destroy the socket so the
       // transfer is seen as failed and no file is kept.
       archive.abort();
-      res.destroy(err instanceof Error ? err : new Error('Archive build failed'));
+      if (!res.destroyed) {
+        res.destroy(err instanceof Error ? err : new Error('Archive build failed'));
+      }
     }
   }
 }

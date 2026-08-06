@@ -23,10 +23,17 @@ function installProcessSafetyNets() {
     );
   });
 
-  // An uncaught exception leaves less certain state than a rejection, so this
-  // only logs — it deliberately does not swallow a genuine crash loop.
-  process.on('uncaughtException', (err) => {
-    logger.error('Uncaught exception', err instanceof Error ? err.stack : String(err));
+  // 'uncaughtExceptionMonitor', NOT 'uncaughtException'. Registering an
+  // uncaughtException listener *replaces* Node's default behaviour, so the
+  // process would keep running after an exception left it in an unknown state —
+  // exactly the failure mode this net is supposed to make visible rather than
+  // hide. The monitor variant observes the error for logging and then lets Node
+  // terminate as it normally would.
+  process.on('uncaughtExceptionMonitor', (err) => {
+    logger.error(
+      'Uncaught exception (process will terminate)',
+      err instanceof Error ? err.stack : String(err),
+    );
   });
 }
 

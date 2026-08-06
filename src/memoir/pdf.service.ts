@@ -49,20 +49,24 @@ export class PdfService implements OnModuleDestroy {
         const executablePath = this.config.get<string>(
           'PUPPETEER_EXECUTABLE_PATH',
         );
+        // Args that are always safe. Notably NOT including the sandbox switches:
+        // Chromium's sandbox is the main thing standing between a renderer
+        // exploit and the API process, so it stays on unless the runtime can't
+        // support it (see below).
+        const baseArgs = [
+          // /dev/shm is small in containers; without this Chromium can crash
+          // partway through rendering rather than failing to launch.
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+          // Nothing here needs an extension host or the first-run machinery,
+          // and skipping them cuts a meaningful slice off cold start.
+          '--disable-extensions',
+          '--no-first-run',
+          '--no-default-browser-check',
+        ];
+        const sandboxOffArgs = ['--no-sandbox', '--disable-setuid-sandbox'];
+
         const launchOptions: Record<string, unknown> = {
-          args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            // /dev/shm is small in containers; without this Chromium can crash
-            // partway through rendering rather than failing to launch.
-            '--disable-dev-shm-usage',
-            '--disable-gpu',
-            // Nothing here needs an extension host or the first-run machinery,
-            // and skipping them cuts a meaningful slice off cold start.
-            '--disable-extensions',
-            '--no-first-run',
-            '--no-default-browser-check',
-          ],
           // The default 30s launch timeout is easy to exceed on a cold Windows
           // dev machine or a throttled container, and a timeout is worse than a
           // slow start: Puppeteer tears down the profile directory while
@@ -73,7 +77,36 @@ export class PdfService implements OnModuleDestroy {
           protocolTimeout: 60_000,
         };
         if (executablePath) launchOptions.executablePath = executablePath;
-        const browser = await puppeteer.default.launch(launchOptions);
+
+        const launch = (extraArgs: string[]) =>
+          puppeteer.default.launch({ ...launchOptions, args: [...baseArgs, ...extraArgs] });
+
+        // Sandboxed by default, with two escape hatches:
+        //
+        //  * PUPPETEER_DISABLE_SANDBOX=true skips straight to the unsandboxed
+        //    launch, for images known to need it (root without a permissive
+        //    seccomp profile, which is the common container case).
+        //  * Otherwise we try sandboxed first and fall back once on failure,
+        //    logging a warning. Previously the sandbox was disabled
+        //    unconditionally, which silently gave up that protection even where
+        //    it would have worked — and a hard removal would have taken PDF
+        //    generation down anywhere it doesn't.
+        let browser: Browser;
+        if (this.config.get<string>('PUPPETEER_DISABLE_SANDBOX') === 'true') {
+          browser = await launch(sandboxOffArgs);
+        } else {
+          try {
+            browser = await launch([]);
+          } catch (err) {
+            this.logger.warn(
+              'Chromium could not launch with its sandbox enabled — retrying without it. ' +
+                'This weakens isolation for PDF rendering; fix the container (or set ' +
+                'PUPPETEER_DISABLE_SANDBOX=true to make it explicit). Cause: ' +
+                (err instanceof Error ? err.message : String(err)),
+            );
+            browser = await launch(sandboxOffArgs);
+          }
+        }
         // If Chromium dies, drop the cached handle so the next call relaunches.
         browser.on('disconnected', () => {
           this.browser = null;

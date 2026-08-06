@@ -426,7 +426,7 @@ export class ReleasePlanService {
     cancelToken: string,
     recipients: Array<{ id: string; name: string; email: string; phone: string | null }>,
   ) {
-    await this.logReleaseEvent(planId, 'notifications_sending', 'Sending notifications to all parties', 'system');
+    await this.logReleaseEvent(planId, 'notifications_sending', 'Sending notifications to all parties', 'system', accountOwnerId);
 
     const deliveryDate = deliveryScheduledAt.toDateString();
     const cancelUrl = `${this.frontendUrl}/release/cancel/${cancelToken}`;
@@ -495,8 +495,8 @@ export class ReleasePlanService {
       }
     }
 
-    await this.logReleaseEvent(planId, 'notifications_sent', 'All parties notified', 'system');
-    await this.logReleaseEvent(planId, 'waiting_period_started', '5-day waiting period started', 'system');
+    await this.logReleaseEvent(planId, 'notifications_sent', 'All parties notified', 'system', accountOwnerId);
+    await this.logReleaseEvent(planId, 'waiting_period_started', '5-day waiting period started', 'system', accountOwnerId);
   }
 
   // POST /rm/release-plan/cancel
@@ -579,12 +579,28 @@ export class ReleasePlanService {
     // effects a second time.
     if (!cancelledRows?.length) return;
 
-    await this.logReleaseEvent(
+    const audited = await this.logReleaseEvent(
       plan.id,
       'release_cancelled',
       `Release cancelled by ${cancelledBy === 'release_manager' ? 'Release Manager' : 'account owner'}`,
       cancelledBy,
+      plan.user_id,
     );
+
+    // Deliberately not thrown. The cancellation itself is already committed —
+    // release_plans.status is the authority that stops delivery, and the
+    // activity_log entry below is a second durable record. Failing the request
+    // here would report a cancellation that actually happened as an error, which
+    // is the more dangerous outcome. Escalated instead, because the RM's
+    // cancellations_received count is derived from the row we just failed to
+    // write and will under-report until it's reconciled.
+    if (!audited) {
+      this.logger.error(
+        `Release ${plan.id} was cancelled but its release_plan_activity_log entry could not be written. ` +
+          `Delivery is still correctly blocked by release_plans.status='cancelled'; ` +
+          `cancellations_received will under-report for this plan until the row is backfilled.`,
+      );
+    }
 
     this.notifyCancellation(plan, reason).catch((err) =>
       this.logger.error('Failed to send cancellation notifications', err),
@@ -755,6 +771,9 @@ export class ReleasePlanService {
         'delivery_email_sent',
         `Delivery email sent to ${recipient.name}`,
         'system',
+        // Inside the per-recipient loop — without this the owner lookup would
+        // run once per recipient.
+        plan.user_id,
       );
       notified++;
     }
@@ -1038,6 +1057,7 @@ td{border-bottom:1px solid #eee;padding:6px 8px}
         'guardian_escalation',
         `Guardian escalation requested by ${rm.name}`,
         'release_manager',
+        accountOwnerId,
       );
     }
 
@@ -1061,27 +1081,41 @@ td{border-bottom:1px solid #eee;padding:6px 8px}
     };
   }
 
+  /** Returns whether the audit row was written. Callers on release-critical
+   *  paths check this; the rest treat logging as best-effort. */
   private async logReleaseEvent(
     releasePlanId: string,
     eventType: string,
     eventLabel: string,
     actorRole: string,
     userId?: string,
-  ) {
+  ): Promise<boolean> {
     // release_plan_activity_log.user_id is NOT NULL and identifies the account
     // owner the plan belongs to — actor_role separately records who acted. It
     // was omitted entirely before, so every insert failed the not-null check;
     // because the result was never inspected, the failure was silent and the
     // activity log stayed permanently empty (taking the activity report PDF and
     // buildStep3's cancellation count with it).
+    // Every caller that already has the owner passes it. The fallback exists for
+    // markPortalAccessed, which is reached from the recipient portal and only
+    // ever knows the plan id.
     let ownerId = userId;
     if (!ownerId) {
-      const { data } = await this.supabase
+      const { data, error: lookupError } = await this.supabase
         .getClient()
         .from('release_plans')
         .select('user_id')
         .eq('id', releasePlanId)
         .maybeSingle();
+
+      // Logged with the real cause: otherwise a failed lookup is
+      // indistinguishable from "plan not found" in the generic message below.
+      if (lookupError) {
+        this.logger.error(
+          `Failed to resolve owner for plan ${releasePlanId} while logging '${eventType}'`,
+          lookupError,
+        );
+      }
       ownerId = (data as { user_id: string } | null)?.user_id;
     }
 
@@ -1089,23 +1123,43 @@ td{border-bottom:1px solid #eee;padding:6px 8px}
       this.logger.error(
         `Cannot log release event '${eventType}': no owner resolved for plan ${releasePlanId}`,
       );
-      return;
+      return false;
     }
 
-    const { error } = await this.supabase
-      .getClient()
-      .from('release_plan_activity_log')
-      .insert({
-        release_plan_id: releasePlanId,
-        user_id: ownerId,
-        event_type: eventType,
-        event_label: eventLabel,
-        actor_role: actorRole,
-      });
+    // Retried once. This table is the audit trail for a legally sensitive
+    // handover, and buildStep3 derives cancellations_received by counting
+    // release_cancelled rows — a dropped insert under-reports a cancellation to
+    // the Release Manager. One retry covers the transient connection blips that
+    // account for most failures without turning a hard error into a stall.
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const { error } = await this.supabase
+        .getClient()
+        .from('release_plan_activity_log')
+        .insert({
+          release_plan_id: releasePlanId,
+          user_id: ownerId,
+          event_type: eventType,
+          event_label: eventLabel,
+          actor_role: actorRole,
+        });
 
-    if (error) {
-      this.logger.error(`Failed to log release event '${eventType}'`, error);
+      if (!error) return true;
+
+      if (attempt === 1) {
+        this.logger.warn(
+          `Retrying release event '${eventType}' for plan ${releasePlanId} after insert failure: ${error.message}`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        continue;
+      }
+
+      this.logger.error(
+        `Failed to log release event '${eventType}' for plan ${releasePlanId} after 2 attempts`,
+        error,
+      );
     }
+
+    return false;
   }
 
   private daysSince(iso: string | null): number | null {
