@@ -144,6 +144,12 @@ export class MessagesService {
         new_asset_settings: {
           playback_policy: ['signed'],
           encoding_tier: 'baseline',
+          // Mux serves no downloadable file unless a static rendition is
+          // requested — without this, a video can only ever be streamed. The RM
+          // video-download page depends on 'highest.mp4' existing. Assets
+          // created before this was added have it enabled lazily on first
+          // listing (see RmDownloadsService.listVideos).
+          static_renditions: [{ resolution: 'highest' }],
         },
         cors_origin: frontendUrl,
       });

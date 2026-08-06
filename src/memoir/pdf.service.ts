@@ -50,7 +50,27 @@ export class PdfService implements OnModuleDestroy {
           'PUPPETEER_EXECUTABLE_PATH',
         );
         const launchOptions: Record<string, unknown> = {
-          args: ['--no-sandbox', '--disable-setuid-sandbox'],
+          args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            // /dev/shm is small in containers; without this Chromium can crash
+            // partway through rendering rather than failing to launch.
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            // Nothing here needs an extension host or the first-run machinery,
+            // and skipping them cuts a meaningful slice off cold start.
+            '--disable-extensions',
+            '--no-first-run',
+            '--no-default-browser-check',
+          ],
+          // The default 30s launch timeout is easy to exceed on a cold Windows
+          // dev machine or a throttled container, and a timeout is worse than a
+          // slow start: Puppeteer tears down the profile directory while
+          // Chromium may still hold files in it, which on Windows surfaces as an
+          // asynchronous EBUSY unlink rejection with no call site to catch it.
+          timeout: 60_000,
+          // Keep a stalled CDP call from hanging a request forever.
+          protocolTimeout: 60_000,
         };
         if (executablePath) launchOptions.executablePath = executablePath;
         const browser = await puppeteer.default.launch(launchOptions);

@@ -3,9 +3,12 @@ import {
   Injectable,
   InternalServerErrorException,
   Logger,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { Archiver, ZipArchive } from 'archiver';
 import sanitizeHtml from 'sanitize-html';
+import Mux from '@mux/mux-node';
+import { ConfigService } from '@nestjs/config';
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
 import { ActivityService } from '../activity/activity.service.js';
 import { PdfService } from '../memoir/pdf.service.js';
@@ -51,6 +54,7 @@ export class RmDownloadsService {
     private readonly supabase: SupabaseService,
     private readonly activityService: ActivityService,
     private readonly pdfService: PdfService,
+    private readonly config: ConfigService,
   ) {}
 
   // Content only becomes downloadable once the account owner's release has
@@ -93,6 +97,136 @@ export class RmDownloadsService {
     }
 
     return new Set((data ?? []).map((a) => a.content_id));
+  }
+
+  private getMuxClient(): Mux {
+    const tokenId = this.config.get<string>('MUX_TOKEN_ID');
+    const tokenSecret = this.config.get<string>('MUX_TOKEN_SECRET');
+    if (!tokenId || !tokenSecret) {
+      throw new ServiceUnavailableException('Video service not configured');
+    }
+    const signingKey = this.config.get<string>('MUX_SIGNING_KEY');
+    const privateKey = this.config.get<string>('MUX_PRIVATE_KEY');
+    return new Mux({
+      tokenId,
+      tokenSecret,
+      ...(signingKey && { jwtSigningKey: signingKey }),
+      ...(privateKey && { jwtPrivateKey: privateKey }),
+    });
+  }
+
+  // GET /rm/downloads/videos
+  //
+  // Video messages live in Mux, not Supabase Storage, so they can't be added to
+  // the content ZIP the way audio/photos/documents are — hence a separate page
+  // that downloads them one at a time.
+  //
+  // Downloading a Mux asset requires a *static rendition* ('highest.mp4'); Mux
+  // exposes no downloadable file otherwise. New uploads request one at creation
+  // (MessagesService.createVideoUploadUrl), but assets predating that have none,
+  // so this enables it lazily on first listing and reports 'preparing' until
+  // Mux finishes transcoding. Nothing here blocks on that.
+  async listVideos(ownerId: string) {
+    await this.assertReleaseInitiated(ownerId);
+
+    const assignedIds = await this.getAssignedContentIds(ownerId, 'message');
+    if (assignedIds.size === 0) return { videos: [] };
+
+    const { data: messages, error } = await this.supabase
+      .getClient()
+      .from('messages')
+      .select('id, title, mux_asset_id, mux_playback_id, duration_seconds, created_at')
+      .eq('user_id', ownerId)
+      .eq('type', 'video')
+      .in('id', [...assignedIds])
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      throw new InternalServerErrorException('Failed to fetch video messages.');
+    }
+
+    const ready = (messages ?? []).filter((m) => m.mux_asset_id && m.mux_playback_id);
+    if (ready.length === 0) return { videos: [] };
+
+    const mux = this.getMuxClient();
+
+    const videos = await mapWithConcurrency(ready, DOWNLOAD_CONCURRENCY, async (m) => {
+      const playbackId = m.mux_playback_id as string;
+      const title = m.title || 'Untitled video';
+
+      // Signed playback policy: both the thumbnail and the MP4 need a JWT.
+      // 'thumbnail' → aud 't', 'video' → aud 'v'; per Mux's static-rendition
+      // guide the MP4 uses the same signing as normal playback.
+      let thumbnailUrl: string | null = null;
+      let downloadToken: string | null = null;
+      try {
+        const [thumbToken, videoToken] = await Promise.all([
+          mux.jwt.signPlaybackId(playbackId, { type: 'thumbnail', expiration: '1h' }),
+          mux.jwt.signPlaybackId(playbackId, { type: 'video', expiration: '1h' }),
+        ]);
+        thumbnailUrl = `https://image.mux.com/${playbackId}/thumbnail.jpg?token=${thumbToken}`;
+        downloadToken = videoToken;
+      } catch (err) {
+        this.logger.error(`Failed to sign Mux tokens for message ${m.id}`, err);
+      }
+
+      let status: 'ready' | 'preparing' | 'errored' = 'preparing';
+      let fileSizeBytes: number | null = null;
+
+      try {
+        const asset = await mux.video.assets.retrieve(m.mux_asset_id as string);
+        const files = asset.static_renditions?.files ?? [];
+        const mp4 = files.find((f) => f.name === 'highest.mp4');
+
+        if (!mp4) {
+          // No rendition requested for this asset yet — request one now. Safe to
+          // attempt repeatedly: a duplicate request is rejected and swallowed,
+          // and the next poll will see it as 'preparing'.
+          try {
+            await mux.video.assets.createStaticRendition(m.mux_asset_id as string, {
+              resolution: 'highest',
+            });
+          } catch (err) {
+            this.logger.warn(
+              `Could not request a static rendition for asset ${m.mux_asset_id}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
+        } else if (mp4.status === 'ready') {
+          status = 'ready';
+          fileSizeBytes = mp4.filesize ? Number(mp4.filesize) : null;
+        } else if (mp4.status === 'errored' || mp4.status === 'skipped') {
+          status = 'errored';
+        }
+      } catch (err) {
+        this.logger.error(`Failed to read Mux asset for message ${m.id}`, err);
+        status = 'errored';
+      }
+
+      // ?download= makes the browser save rather than navigate. It matters
+      // because the file is cross-origin, where the anchor `download`
+      // attribute is ignored.
+      const downloadUrl =
+        status === 'ready' && downloadToken
+          ? `https://stream.mux.com/${playbackId}/highest.mp4?download=${encodeURIComponent(
+              sanitizeFileName(title),
+            )}&token=${downloadToken}`
+          : null;
+
+      return {
+        id: m.id,
+        title,
+        duration_seconds: m.duration_seconds ?? null,
+        created_at: m.created_at,
+        thumbnail_url: thumbnailUrl,
+        download_url: downloadUrl,
+        file_size_bytes: fileSizeBytes,
+        status,
+      };
+    });
+
+    return { videos };
   }
 
   // GET /rm/downloads/summary
@@ -342,7 +476,24 @@ export class RmDownloadsService {
     const results = await mapWithConcurrency(messages ?? [], DOWNLOAD_CONCURRENCY, async (m) => {
       if (!m.transcript || !m.transcript.trim()) return false;
       const html = this.buildTranscriptHtml(m.title || 'Untitled Message', m.type, m.transcript);
-      const buffer = await this.pdfService.generatePdfFromHtml(html);
+
+      // PDF rendering is the only step here that depends on Chromium, and it is
+      // by far the most failure-prone (launch timeouts, sandbox issues, memory).
+      // Skip the individual transcript rather than letting it throw: this runs
+      // while the archive is already streaming to the client, so an exception
+      // would truncate the ZIP mid-write and hand the user a file that looks
+      // complete but has no central directory ("invalid archive").
+      let buffer: Buffer;
+      try {
+        buffer = await this.pdfService.generatePdfFromHtml(html);
+      } catch (err) {
+        this.logger.error(
+          `Skipping transcript PDF for message ${m.id} — PDF generation failed`,
+          err instanceof Error ? err.stack : err,
+        );
+        return false;
+      }
+
       archive.append(buffer, {
         name: uniqueName(`Transcripts/${sanitizeFileName(m.title || 'Untitled Message')}.pdf`),
       });
@@ -393,16 +544,28 @@ p{white-space:pre-wrap}
     // Exhibits are intentionally omitted from the RM's life-story PDF — this
     // package is a text/document handoff, not a re-render of the full memoir
     // builder experience.
-    const { buffer } = await this.pdfService.generatePdf({
-      title: memoir?.title ?? null,
-      dedication: memoir?.dedication ?? null,
-      chapters: chapters.map((c) => ({
-        title: c.title,
-        date_label: c.date_label,
-        theme: c.theme,
-        body: c.body,
-      })),
-    });
+    // Same reasoning as addTranscripts: skip rather than throw, because the
+    // archive is already streaming and an exception here would truncate it.
+    let buffer: Buffer;
+    try {
+      ({ buffer } = await this.pdfService.generatePdf({
+        title: memoir?.title ?? null,
+        dedication: memoir?.dedication ?? null,
+        chapters: chapters.map((c) => ({
+          title: c.title,
+          date_label: c.date_label,
+          theme: c.theme,
+          body: c.body,
+        })),
+      }));
+    } catch (err) {
+      this.logger.error(
+        `Skipping Life Story PDF for owner ${ownerId} — PDF generation failed`,
+        err instanceof Error ? err.stack : err,
+      );
+      return 0;
+    }
+
     archive.append(buffer, { name: uniqueName('Life Story.pdf') });
     return chapters.length;
   }

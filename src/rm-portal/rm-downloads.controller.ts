@@ -19,6 +19,13 @@ export class RmDownloadsController {
     return this.rmDownloadsService.getSummary(req.accountContext.accountOwnerId);
   }
 
+  // Video messages live in Mux and can't go in the ZIP — listed separately so
+  // they can be downloaded one at a time.
+  @Get('videos')
+  async getVideos(@Request() req: any) {
+    return this.rmDownloadsService.listVideos(req.accountContext.accountOwnerId);
+  }
+
   @Post('prepare')
   async prepare(@Request() req: any, @Body() dto: PrepareDownloadDto, @Res() res: Response) {
     const { archive, filename, populate } =
@@ -36,8 +43,14 @@ export class RmDownloadsController {
       this.logger.error('Archive stream failed while preparing download', err);
       if (!res.headersSent) {
         res.status(500);
+        res.end();
+        return;
       }
-      res.end();
+      // Same trap as the catch below: res.end() mid-archive completes the
+      // response and yields a ZIP with no central directory that the client
+      // stores as a finished download. Destroy the socket so it registers as a
+      // failed transfer instead.
+      res.destroy(err);
     });
 
     // Pipe before populating so entries stream to the client as they're
@@ -53,11 +66,21 @@ export class RmDownloadsController {
     } catch (err) {
       if (!streamFailed) {
         this.logger.error('Failed to build download archive', err);
-        if (!res.headersSent) {
-          res.status(500);
-        }
-        res.end();
       }
+      if (!res.headersSent) {
+        res.status(500);
+        res.end();
+        return;
+      }
+
+      // Headers are already out and entries have already been written, so the
+      // status code can't be changed. Critically, do NOT res.end() here: that
+      // completes the HTTP response and hands over a ZIP with entries but no
+      // central directory, which the client saves happily and every extractor
+      // then rejects as invalid. Abort the archive and destroy the socket so the
+      // transfer is seen as failed and no file is kept.
+      archive.abort();
+      res.destroy(err instanceof Error ? err : new Error('Archive build failed'));
     }
   }
 }
