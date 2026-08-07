@@ -973,6 +973,82 @@ td{border-bottom:1px solid #eee;padding:6px 8px}
 </body></html>`;
   }
 
+  /**
+   * PATCH /rm/release-plan/schedule — QA/support override for the delivery date.
+   *
+   * The waiting period is five business days, which makes the later steps of the
+   * release flow untestable in a single sitting. This moves the date the flow
+   * actually gates on (continueDelivery compares delivery_scheduled_at to now),
+   * so the rest of the flow can be exercised without waiting.
+   *
+   * Authorisation is the caller's normal RM session *plus* a shared secret
+   * checked in the controller — see the note there on why the secret can't live
+   * in the frontend. Every use is written to the release activity log, because a
+   * privileged change to a release timeline should never be invisible.
+   */
+  async overrideDeliverySchedule(
+    accountOwnerId: string,
+    deliveryScheduledAt: string,
+  ) {
+    const plan = await this.getLatestPlan(accountOwnerId);
+    if (!plan) throw new NotFoundException('No release plan found.');
+
+    // Only a live plan has a delivery date worth moving: once delivered the date
+    // is history, and a cancelled plan isn't going to deliver at all.
+    if (plan.status !== 'active' || plan.delivered_at) {
+      throw new BadRequestException(
+        `Only an active, undelivered release plan can be rescheduled (this one is ${
+          plan.delivered_at ? 'already delivered' : plan.status
+        }).`,
+      );
+    }
+
+    const previous = plan.delivery_scheduled_at;
+    const next = new Date(deliveryScheduledAt);
+    if (Number.isNaN(next.getTime())) {
+      throw new BadRequestException('deliveryScheduledAt is not a valid date.');
+    }
+
+    const { data: updated, error } = await this.supabase
+      .getClient()
+      .from('release_plans')
+      .update({
+        delivery_scheduled_at: next.toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', plan.id)
+      .eq('status', 'active')
+      .select('id, plan_id, status, initiated_at, delivery_scheduled_at')
+      .maybeSingle();
+
+    if (error || !updated) {
+      throw new InternalServerErrorException(
+        'Failed to update the delivery schedule.',
+      );
+    }
+
+    await this.logReleaseEvent(
+      plan.id,
+      'delivery_rescheduled',
+      `Delivery date changed from ${previous} to ${next.toISOString()} (override)`,
+      'system',
+      accountOwnerId,
+    );
+
+    this.logger.warn(
+      `Delivery schedule overridden for plan ${plan.id} (owner ${accountOwnerId}): ${previous} -> ${next.toISOString()}`,
+    );
+
+    return {
+      id: updated.id,
+      plan_id: updated.plan_id,
+      status: updated.status,
+      initiated_at: updated.initiated_at,
+      delivery_scheduled_at: updated.delivery_scheduled_at,
+      previous_delivery_scheduled_at: previous,
+    };
+  }
+
   // POST /rm/release-plan/guardian-request
   async requestGuardianEscalation(
     accountOwnerId: string,

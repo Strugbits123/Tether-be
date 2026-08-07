@@ -1,12 +1,18 @@
+import { timingSafeEqual } from 'crypto';
 import {
   Body,
   Controller,
+  ForbiddenException,
   Get,
+  Headers,
+  NotFoundException,
+  Patch,
   Post,
   Request,
   Res,
   UseGuards,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import type { Response } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { AccountContextGuard } from '../auth/guards/account-context.guard.js';
@@ -14,13 +20,75 @@ import { RoleGuard, Roles } from '../auth/guards/role.guard.js';
 import { InitiateReleaseDto } from './dto/initiate-release.dto.js';
 import { CancelReleaseDto } from './dto/cancel-release.dto.js';
 import { GuardianRequestDto } from './dto/guardian-request.dto.js';
+import { OverrideScheduleDto } from './dto/override-schedule.dto.js';
 import { ReleasePlanService } from './release-plan.service.js';
 
 @Controller('rm/release-plan')
 @UseGuards(JwtAuthGuard, AccountContextGuard, RoleGuard)
 @Roles('release_manager', 'guardian')
 export class ReleasePlanController {
-  constructor(private readonly releasePlanService: ReleasePlanService) {}
+  constructor(
+    private readonly releasePlanService: ReleasePlanService,
+    private readonly config: ConfigService,
+  ) {}
+
+  /**
+   * Gate for the delivery-date override.
+   *
+   * The secret is verified here rather than in the frontend on purpose. Anything
+   * a Next.js client can read is compiled into the JS bundle (NEXT_PUBLIC_*) and
+   * visible in devtools, and a client-side check is bypassed by calling this
+   * endpoint directly — which would leave the date that releases someone's entire
+   * legacy effectively unauthenticated. The operator types the password, the
+   * server compares it.
+   *
+   * Absent config disables the route entirely and answers 404, so production can
+   * simply not set the variable and the endpoint ceases to exist as far as any
+   * caller can tell.
+   */
+  private assertOverrideAuthorised(provided: string | undefined): void {
+    const expected = this.config.get<string>(
+      'RELEASE_SCHEDULE_OVERRIDE_SECRET',
+    );
+
+    if (!expected) {
+      throw new NotFoundException();
+    }
+
+    if (!provided) {
+      throw new ForbiddenException('Override password required.');
+    }
+
+    // Length-prefixed compare: timingSafeEqual throws on a length mismatch, and
+    // comparing with === would leak the secret's length through timing.
+    const a = Buffer.from(provided);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) {
+      throw new ForbiddenException('Incorrect override password.');
+    }
+  }
+
+  /**
+   * QA/support only: move an active plan's delivery date so the post-waiting-period
+   * steps can be tested without waiting five business days.
+   *
+   * Requires all four of: a valid session, an account context, the
+   * release_manager role, and the override secret. Every call is written to the
+   * release activity log.
+   */
+  @Patch('schedule')
+  @Roles('release_manager')
+  async overrideSchedule(
+    @Request() req: any,
+    @Headers('x-release-override-secret') secret: string | undefined,
+    @Body() dto: OverrideScheduleDto,
+  ) {
+    this.assertOverrideAuthorised(secret);
+    return this.releasePlanService.overrideDeliverySchedule(
+      req.accountContext.accountOwnerId,
+      dto.deliveryScheduledAt,
+    );
+  }
 
   @Get()
   async getReleasePlan(@Request() req: any) {
