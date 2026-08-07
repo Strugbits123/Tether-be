@@ -1009,6 +1009,14 @@ td{border-bottom:1px solid #eee;padding:6px 8px}
       throw new BadRequestException('deliveryScheduledAt is not a valid date.');
     }
 
+    // The `delivered_at is null` predicate is the important one and has to be in
+    // the UPDATE, not just the read above. continueDelivery sets ONLY
+    // delivered_at — it leaves status as 'active' — so an `.eq('status','active')`
+    // guard alone would happily rewrite the schedule of a plan that had been
+    // delivered in the moment between the read and this write. Making it a
+    // condition of the update itself is atomic: Postgres evaluates it against the
+    // row at write time, and continueDelivery guards its own transition the same
+    // way, so the two can't interleave into an inconsistent state.
     const { data: updated, error } = await this.supabase
       .getClient()
       .from('release_plans')
@@ -1018,26 +1026,51 @@ td{border-bottom:1px solid #eee;padding:6px 8px}
       })
       .eq('id', plan.id)
       .eq('status', 'active')
+      .is('delivered_at', null)
       .select('id, plan_id, status, initiated_at, delivery_scheduled_at')
       .maybeSingle();
 
-    if (error || !updated) {
+    if (error) {
       throw new InternalServerErrorException(
         'Failed to update the delivery schedule.',
       );
     }
 
-    await this.logReleaseEvent(
+    // No row matched: the plan was delivered or cancelled between the read and
+    // the write. Report that rather than a generic failure — nothing changed.
+    if (!updated) {
+      throw new ConflictException(
+        'The release plan changed while you were editing it (it has since been delivered or cancelled). Reload and try again.',
+      );
+    }
+
+    // Audited before returning success. A privileged change to a release
+    // timeline that leaves no trace is worse than a failed one, so if the audit
+    // row can't be written the caller is told the change landed but wasn't
+    // recorded, rather than getting a clean 200.
+    //
+    // Not a single transaction: supabase-js has no multi-statement transaction,
+    // and wrapping this in an RPC would add another migration for what is a
+    // QA-only tool. logReleaseEvent already retries once internally, and this
+    // ordering guarantees no override is ever silently untracked.
+    const audited = await this.logReleaseEvent(
       plan.id,
       'delivery_rescheduled',
       `Delivery date changed from ${previous} to ${next.toISOString()} (override)`,
-      'system',
+      // A person did this, not the scheduler — actor_role should say so.
+      'release_manager',
       accountOwnerId,
     );
 
     this.logger.warn(
       `Delivery schedule overridden for plan ${plan.id} (owner ${accountOwnerId}): ${previous} -> ${next.toISOString()}`,
     );
+
+    if (!audited) {
+      throw new InternalServerErrorException(
+        `The delivery date was changed to ${next.toISOString()}, but the audit entry could not be written. Record this change manually.`,
+      );
+    }
 
     return {
       id: updated.id,
