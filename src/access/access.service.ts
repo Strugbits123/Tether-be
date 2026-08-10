@@ -24,6 +24,7 @@ import { AddRecipientDto } from './dto/add-recipient.dto.js';
 import { UpdateRecipientDto } from './dto/update-recipient.dto.js';
 import { ChangeReleaseManagerDto } from './dto/change-release-manager.dto.js';
 import { DesignateGuardianDto } from './dto/designate-guardian.dto.js';
+import { resolveOwnerName } from '../shared/owner-name.util.js';
 
 const CONTENT_TYPE_KEYS: Record<string, string> = {
   photo: 'photos',
@@ -72,7 +73,7 @@ export class AccessService {
     const { data } = await this.supabase
       .getClient()
       .from('users')
-      .select('id, full_name, email, onboarding')
+      .select('id, full_name, first_name, last_name, email, onboarding')
       .eq('id', ownerId)
       .single();
     return data;
@@ -468,7 +469,7 @@ export class AccessService {
       .sendRecipientNotification({
         to: email,
         recipientName: name,
-        ownerName: owner.full_name,
+        ownerName: resolveOwnerName(owner),
         signupUrl: `${this.frontendUrl}/signup?ref=recipient`,
       })
       .catch((err) => {
@@ -686,7 +687,7 @@ export class AccessService {
       .sendGuardianInvitation({
         to: recipient.email,
         guardianName: recipient.name,
-        ownerName: owner.full_name,
+        ownerName: resolveOwnerName(owner),
         rmName: rm?.name ?? null,
         order: priorityOrder,
         acceptUrl,
@@ -829,7 +830,7 @@ export class AccessService {
       .sendReleaseManagerInvitation({
         to: email,
         rmName: dto.name,
-        ownerName: owner.full_name,
+        ownerName: resolveOwnerName(owner),
         ownerEmail: owner.email,
         acceptUrl,
       })
@@ -918,7 +919,7 @@ export class AccessService {
       .sendReleaseManagerReminder({
         to: rm.email,
         rmName: rm.name,
-        ownerName: owner.full_name,
+        ownerName: resolveOwnerName(owner),
         acceptUrl,
       })
       .catch((err) => {

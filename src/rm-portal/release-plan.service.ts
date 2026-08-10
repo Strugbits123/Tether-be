@@ -21,6 +21,7 @@ import { InitiateReleaseDto } from './dto/initiate-release.dto.js';
 import { CancelReleaseDto } from './dto/cancel-release.dto.js';
 import { GuardianRequestDto } from './dto/guardian-request.dto.js';
 import { addBusinessDays } from './rm-portal.util.js';
+import { resolveOwnerName } from '../shared/owner-name.util.js';
 
 const WAITING_PERIOD_BUSINESS_DAYS = 5;
 
@@ -48,7 +49,7 @@ export class ReleasePlanService {
     const { data } = await this.supabase
       .getClient()
       .from('users')
-      .select('id, full_name, email')
+      .select('id, full_name, first_name, last_name, email')
       .eq('id', accountOwnerId)
       .single();
     return data;
@@ -98,7 +99,7 @@ export class ReleasePlanService {
         can_initiate: true,
         has_guardians: guardians.length > 0,
         guardian_count: guardians.length,
-        account_owner_name: owner.full_name,
+        account_owner_name: resolveOwnerName(owner),
       };
     }
 
@@ -116,7 +117,7 @@ export class ReleasePlanService {
       delivery_scheduled_at: plan.delivery_scheduled_at,
       delivered_at: plan.delivered_at,
       cancelled_at: plan.cancelled_at,
-      account_owner_name: owner.full_name,
+      account_owner_name: resolveOwnerName(owner),
       step_2_notifications: null,
       step_3_waiting: null,
       step_4_delivery: null,
@@ -434,7 +435,7 @@ export class ReleasePlanService {
     const ownerMessageId = await this.emailService
       .sendReleaseNotificationToOwner({
         to: owner.email,
-        ownerName: owner.full_name,
+        ownerName: resolveOwnerName(owner),
         rmName: rm?.name ?? 'Your Release Manager',
         reason: dto.reason,
         deliveryDate,
@@ -465,7 +466,7 @@ export class ReleasePlanService {
         .sendReleaseNotificationToRecipient({
           to: recipient.email,
           recipientName: recipient.name,
-          ownerName: owner.full_name,
+          ownerName: resolveOwnerName(owner),
           deliveryDate,
         })
         .catch((err) => {
@@ -490,7 +491,7 @@ export class ReleasePlanService {
       if (recipient.phone) {
         await this.smsService.send(
           recipient.phone,
-          `${owner.full_name} has prepared content for you on Tether. You'll receive a link on ${deliveryDate}.`,
+          `${resolveOwnerName(owner)} has prepared content for you on Tether. You'll receive a link on ${deliveryDate}.`,
         );
       }
     }
@@ -629,7 +630,7 @@ export class ReleasePlanService {
       .eq('user_id', plan.user_id);
 
     const parties = [
-      { id: null as string | null, name: owner.full_name, email: owner.email },
+      { id: null as string | null, name: resolveOwnerName(owner), email: owner.email },
       ...((recipients ?? []) as Array<{ id: string; name: string; email: string }>),
     ];
 
@@ -638,7 +639,7 @@ export class ReleasePlanService {
         .sendReleaseCancelledNotification({
           to: party.email,
           name: party.name,
-          ownerName: owner.full_name,
+          ownerName: resolveOwnerName(owner),
           reason,
         })
         .catch(() => null);
@@ -729,7 +730,7 @@ export class ReleasePlanService {
         .sendDeliveryEmail({
           to: recipient.email,
           recipientName: recipient.name,
-          ownerName: owner?.full_name ?? 'Your loved one',
+          ownerName: resolveOwnerName(owner),
           portalUrl,
         })
         .catch((err) => {
@@ -752,7 +753,7 @@ export class ReleasePlanService {
       if (recipient.phone) {
         await this.smsService.send(
           recipient.phone,
-          `${owner?.full_name ?? 'Your loved one'}'s legacy is ready for you: ${portalUrl}`,
+          `${resolveOwnerName(owner)}'s legacy is ready for you: ${portalUrl}`,
         );
       }
 
@@ -960,7 +961,7 @@ table{width:100%;border-collapse:collapse;margin-bottom:2em}
 td{border-bottom:1px solid #eee;padding:6px 8px}
 </style></head><body>
 <h1>Release Plan ${esc(plan.plan_id)}</h1>
-<p><strong>Account owner:</strong> ${esc(owner?.full_name)}</p>
+<p><strong>Account owner:</strong> ${esc(resolveOwnerName(owner))}</p>
 <p><strong>Initiated:</strong> ${esc(plan.initiated_at)}</p>
 <p><strong>Delivery scheduled:</strong> ${esc(plan.delivery_scheduled_at)}</p>
 <p><strong>Reason:</strong> ${esc(plan.reason)}</p>
@@ -1142,7 +1143,7 @@ td{border-bottom:1px solid #eee;padding:6px 8px}
       .sendGuardianEscalation({
         to: guardian.email,
         guardianName: guardian.name,
-        ownerName: owner.full_name,
+        ownerName: resolveOwnerName(owner),
         rmName: rm.name,
         explanation: dto.explanation,
         acceptUrl,

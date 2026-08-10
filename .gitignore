@@ -42,6 +42,4 @@ pnpm-lock.yaml
 *.local
 config.bat
 
-.env
-.env.*
 !.env.example

@@ -69,6 +69,14 @@ Never commit `.env` to git. All secrets live in 1Password Teams.
 settings for whichever endpoint URL you're testing against (dev/staging/prod
 each have their own).
 
+Three optional variables change behaviour by their presence:
+
+| Variable | Effect when set |
+|---|---|
+| `RELEASE_SCHEDULE_OVERRIDE_SECRET` | Enables `PATCH /rm/release-plan/schedule`. **Unset ⇒ the route 404s**, which is the intended state in production — set it on staging/QA only. Treat as a credential: it lets a Release Manager collapse the five-business-day waiting period |
+| `MUX_SIGNING_KEY` / `MUX_PRIVATE_KEY` | Signed thumbnail and MP4 URLs in `GET /rm/downloads/videos`. Without them the endpoint responds but every URL is `null` |
+| `PUPPETEER_DISABLE_SANDBOX` | Launches Chromium with `--no-sandbox`, needed on hosts that can't provide a user namespace (some containers). Off by default — only set it where the sandbox genuinely cannot run |
+
 ## Branch Strategy
 
 - `feature/*` → `develop` (via PR)
@@ -263,9 +271,16 @@ PATCH  /documents/:id
 DELETE /documents/:id
 ```
 
-`file_type` on a document row is the full MIME type captured at upload
-(`application/pdf`, `image/jpeg`, ...), not a bare extension — clients
-deriving an icon/kind from it should match on MIME prefix.
+`file_type` on a document row is a **bare lowercase extension** (`pdf`, `docx`,
+`heic`, `m4v`, …), not a MIME type — the browser's MIME is mapped down via
+`MIME_TO_EXT` (`documents.service.ts`) at the signed-URL step. Clients deriving
+an icon/kind from it should match the extension, not a MIME prefix.
+
+Three lists must agree or uploads fail *after* the bytes are already in storage,
+orphaning the object: `MIME_TO_EXT`, the `@IsIn` on `DocumentItemDto`
+(`create-documents-batch.dto.ts`), and the `documents_file_type_check`
+constraint in [`db/constraints.sql`](./db/constraints.sql). This has bitten
+twice — once for `heic` (iPhone photos) and once for `m4v`.
 
 ### Messages (protected)
 
@@ -361,6 +376,19 @@ GET  /rm/release-plan/delivery-status
 GET  /rm/release-plan/activity-log
 GET  /rm/release-plan/activity-report        # PDF (Puppeteer) — binary response
 POST /rm/release-plan/guardian-request       # escalate to the next Guardian
+PATCH /rm/release-plan/schedule              # QA ONLY — move delivery_scheduled_at so the
+                                              # post-waiting-period steps can be exercised
+                                              # without waiting 5 business days.
+                                              # @Roles('release_manager') only (not guardian),
+                                              # and additionally gated on an
+                                              # x-release-override-secret header compared with
+                                              # timingSafeEqual against
+                                              # RELEASE_SCHEDULE_OVERRIDE_SECRET. If that env
+                                              # var is unset the route 404s, so it does not
+                                              # exist at all on an environment that hasn't
+                                              # opted in. Refuses to reschedule a plan that is
+                                              # not `active` or has already delivered, and
+                                              # writes to the release activity log
 GET  /release/cancel/:token                  # PUBLIC — read-only status check
 POST /release/cancel/:token                  # PUBLIC — the actual cancellation. Kept as a
                                               # separate POST so the public GET can never
@@ -371,7 +399,12 @@ GET  /rm/downloads/summary                   # what's available to download, by 
 POST /rm/downloads/prepare                   # streams a ZIP directly to the response
                                               # (archiver, not buffered in memory).
                                               # Gated on the release actually being
-                                              # initiated; excludes assign_later content
+                                              # initiated; excludes assign_later content.
+                                              # Videos are NOT in this ZIP — see below
+GET  /rm/downloads/videos                    # one entry per assigned video message, each with
+                                              # a signed Mux thumbnail URL, a signed MP4
+                                              # download URL, and a status of
+                                              # ready | preparing | errored
 
 GET    /rm/notifications                     # announcements + a curated activity_log slice
 PATCH  /rm/notifications/:id/read
@@ -399,7 +432,10 @@ GET /activity
 ### Webhooks
 
 ```
-POST /webhooks/mux            # Mux server-to-server callback (signature-verified)
+POST /webhooks/mux            # Mux server-to-server callback (signature-verified). Handles
+                               # asset readiness plus video.asset.static_rendition.ready /
+                               # .errored / .deleted, which is what keeps the cached
+                               # rendition state on `messages` current — see Video Downloads
 POST /webhooks/supabase-auth  # Supabase auth DB webhook (shared-secret verified)
 POST /webhooks/resend         # Resend email events (Svix-signature verified). Handles
                                # email.delivered / .bounced / .opened, updates
@@ -415,6 +451,42 @@ POST /webhooks/resend         # Resend email events (Svix-signature verified). H
 ```
 GET /health
 ```
+
+## Video Downloads (why they're separate from the content ZIP)
+
+Every other content type lives in Supabase Storage, so `/rm/downloads/prepare`
+can fetch and stream it straight into the ZIP. Video doesn't — it lives in Mux,
+and a downloadable file only exists once Mux has produced a **static rendition**
+(a real MP4, distinct from the HLS stream used for playback). That rendition is
+asynchronous, can fail, and is not guaranteed to exist for older assets. Putting
+video in the ZIP would mean either blocking the whole archive on Mux transcoding
+or silently shipping an incomplete one — so videos are listed and downloaded
+individually instead, via `GET /rm/downloads/videos`.
+
+Both URLs that endpoint returns are **signed**, because the playback policy is
+`signed` rather than `public`:
+
+| URL | Signed with | JWT `aud` |
+|---|---|---|
+| thumbnail | `jwt.signPlaybackId(..., { type: 'thumbnail' })` | `t` |
+| MP4 download | `jwt.signPlaybackId(..., { type: 'video' })` | `v` |
+
+Using the wrong `type` mints a token the CDN rejects — the two are not
+interchangeable.
+
+**Rendition state is cached on `messages`, not fetched per request.** Asking Mux
+about every video on every page load was one upstream call per video, repeated
+on every poll while renditions were still transcoding — i.e. most expensive
+exactly when the page polls hardest. The
+`video.asset.static_rendition.*` webhooks write the status to
+`messages.mux_static_rendition_status` (see
+[`db/video-downloads.sql`](./db/video-downloads.sql)), and `listVideos` reads
+the column. `null` means "unknown — no webhook seen yet", which is the only case
+that still falls back to the Mux API, and only once.
+
+Requires `MUX_SIGNING_KEY` / `MUX_PRIVATE_KEY` in addition to the API token
+pair. Without them the endpoint still responds, but every `thumbnail_url` and
+`download_url` comes back `null`.
 
 ## Known Inconsistencies (flagged, not yet unified)
 
@@ -455,7 +527,9 @@ migrations against production. The SQL the app depends on lives in [`db/`](./db)
 |---|---|
 | `rls-policies.sql` | RLS backstop (safe under the service-role key; enforcing if an anon path is added) |
 | `atomic-functions.sql` | RPCs called via `supabase.rpc(...)`: `replace_content_assignments` (transactional assignment replace, advisory-locked per item), `insert_chapter_ordered` / `insert_exhibit_ordered` (race-free `display_order` under a per-owner advisory lock, with a DB-side chapter-ownership check on exhibits) |
-| `constraints.sql` | `unique (user_id)` on `memoirs`, backing the atomic upsert in `MemoirService` |
+| `constraints.sql` | Three things: `unique (user_id)` on `memoirs` (backs the atomic upsert in `MemoirService`); `guardians_live_priority_uniq`, a partial unique index on `(account_id, priority_order)` over live rows that enforces the Guardian cap in the database rather than in a read-then-write service check; and the `documents_category_check` / `documents_file_type_check` CHECK constraints, both of which were found narrower in the live databases than in the code and surfaced as opaque 500s from `POST /documents/batch` |
+| `release-plan.sql` | `release_plans.cancel_token` (the owner's cancel-by-email safety valve — `initiateRelease` INSERTs it, so **every initiate 500s without this**) and `guardian_escalations.guardian_id` / `.status` (escalation 500s without them). Additive and idempotent |
+| `video-downloads.sql` | `messages.mux_static_rendition_status` + related columns — the cached Mux rendition state read by `GET /rm/downloads/videos`. Additive; existing rows get `NULL`, which the service treats as "unknown, ask Mux once" |
 | `storage-limits.sql` | Storage quota schema/config |
 | `analytics.sql` | Analytics-related schema |
 | `announcements.sql` | `announcements` + `announcement_dismissals` tables backing the RM notification bell's system-announcement side. Written idempotently (`alter table ... add column if not exists`) because the live `announcements` table predated this feature with a narrower schema — re-run safely, it only adds what's missing |
@@ -464,7 +538,9 @@ migrations against production. The SQL the app depends on lives in [`db/`](./db)
 Apply `atomic-functions.sql` and `constraints.sql` **before** deploying code that
 calls them — the RPCs and the memoir upsert fail without them. Apply
 `announcements.sql` and `rm-notification-reads.sql` before deploying the RM
-notifications feature, or `/rm/notifications` 500s.
+notifications feature, or `/rm/notifications` 500s. Apply `release-plan.sql`
+before deploying the release flow, or `POST /rm/release-plan/initiate` fails on
+every call, and `video-downloads.sql` before deploying video downloads.
 
 **Storage buckets** (all private and served via short-lived signed URLs, except
 `avatars`):
@@ -531,11 +607,35 @@ Hardening enforced in code (since RLS is bypassed by the service-role key):
   message transcripts) is passed through `sanitize-html` first — plan reason,
   names, timestamps, recipient statuses. This closed a real HTML/script
   injection path in the activity report.
+- **Role enforcement reads both handler and class** — `RoleGuard` resolves
+  `@Roles(...)` with `reflector.getAllAndOverride(ROLES_KEY, [handler, class])`.
+  It previously read the handler alone, so a controller-level `@Roles(...)` with
+  no method-level repeat returned `undefined` and the guard fell through as
+  "no roles required" — which is how most of the RM portal is declared.
 - **Streamed downloads** — `/rm/downloads/prepare` pipes the ZIP archive
   (`archiver`) directly to the HTTP response as entries are compressed,
   rather than buffering the whole package in memory before the client sees a
   byte. Per-file fetches (audio/documents/photos/transcripts) run with bounded
   concurrency (5 at a time) instead of one-at-a-time.
+- **Failed downloads fail loudly** — a mid-stream error calls `archive.abort()`
+  and destroys the socket (`res.destroy(err)`), never `res.end()`. Ending the
+  response normally lets `archiver` write a valid ZIP central directory over a
+  partial payload, producing an archive that looks fine to the client and is
+  silently missing files. Destroying the connection makes the client see a
+  truncated transfer, which is the truth.
+- **Audit log integrity** — `logReleaseEvent` writes the NOT NULL `user_id`,
+  returns a boolean, and retries once. It previously omitted `user_id` and
+  discarded the Supabase error, so **every** release-plan audit write failed and
+  the activity log was permanently empty while appearing to work.
+- **Owner name resolution** — anything that shows an account owner's name to a
+  human goes through `resolveOwnerName` (`src/shared/owner-name.util.ts`).
+  `users.full_name` is only written when both name parts are set, so it is blank
+  for any owner who never finished their profile — raw interpolation produced
+  emails subject-lined " has chosen you as their Release Manager on Tether".
+  `EmailService` re-applies the same guard internally as a backstop.
+- **Chromium sandboxing** — the PDF renderer keeps Chromium's sandbox enabled by
+  default; `--no-sandbox` is opt-in via `PUPPETEER_DISABLE_SANDBOX` for hosts
+  that cannot provide a user namespace, rather than being hardcoded on.
 - **Webhook idempotency** — `ResendWebhookService.handleBounced` checks the
   `notification_log` row isn't already `bounced` before re-running its
   side effects, so a replayed webhook event can't double-process.
@@ -559,4 +659,5 @@ Hardening enforced in code (since RLS is bypassed by the service-role key):
 - Sprint 3 ✅ — Photo folders, content assignments, cross-type Content module (unassigned listing, bulk assign/delete)
 - Sprint 4 ✅ — Memoir: text & voice chapters (Deepgram transcription), exhibits, per-chapter TTS narration, PDF/text export, feedback module
 - Sprint 5 ✅ — Release Manager portal: multi-membership auth (`/auth/memberships`, switch-context, invitations with email-match verification), Access module (owner-side RM/guardian/recipient management), RM overview/recipients/release-plan/downloads/notifications, Resend webhook + notification_log, security hardening (HTML escaping, atomic delivery, streamed downloads, RLS-aware invite check)
-- Sprint 6–10 — See sprint execution plan
+- Sprint 6 ✅ — Release plan end to end (initiate → notify → 5-business-day wait → deliver → complete, cancel-by-token, guardian escalation, activity log + PDF report) and the schema it needs (`db/release-plan.sql`); RM downloads (streamed content ZIP + Mux-backed per-video downloads with webhook-cached rendition state); Guardian cap lowered to 2 and enforced by a partial unique index; `resolveOwnerName` fallback across all email/SMS/PDF/portal copy; QA schedule override; security fixes (`RoleGuard` handler+class resolution, audit-log writes, ZIP abort semantics, Chromium sandbox)
+- Sprint 7–10 — See sprint execution plan

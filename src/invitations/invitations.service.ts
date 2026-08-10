@@ -23,13 +23,19 @@ import { InviteGuardianDto } from './dto/invite-guardian.dto.js';
 import { InviteRecipientDto } from './dto/invite-recipient.dto.js';
 import { RelationshipType } from '../recipients/dto/create-recipient.dto.js';
 import { RmRelationshipType } from '../release-managers/dto/create-release-manager.dto.js';
+import { resolveOwnerName } from '../shared/owner-name.util.js';
 
 // getClient() has no generated Database type param, so every read otherwise
 // resolves to `any` — narrow the shapes we actually rely on explicitly
 // instead, rather than trusting untyped `data` fields throughout this file.
 interface OwnerRow {
   id: string;
-  full_name: string;
+  // Nullable in practice: full_name is only written once both name parts exist,
+  // so it is blank for owners who never finished their profile. Route every
+  // human-facing use through resolveOwnerName rather than reading it directly.
+  full_name: string | null;
+  first_name: string | null;
+  last_name: string | null;
   email: string;
 }
 
@@ -88,7 +94,7 @@ export class InvitationsService {
     const { data } = await this.supabase
       .getClient()
       .from('users')
-      .select('id, full_name, email')
+      .select('id, full_name, first_name, last_name, email')
       .eq('id', ownerId)
       .single();
     return data as OwnerRow | null;
@@ -184,7 +190,7 @@ export class InvitationsService {
       .sendReleaseManagerInvitation({
         to: email,
         rmName: dto.name,
-        ownerName: owner.full_name,
+        ownerName: resolveOwnerName(owner),
         ownerEmail: owner.email,
         acceptUrl,
       })
@@ -278,7 +284,7 @@ export class InvitationsService {
       .sendGuardianInvitation({
         to: email,
         guardianName: dto.name,
-        ownerName: owner.full_name,
+        ownerName: resolveOwnerName(owner),
         rmName: activeRm?.name ?? null,
         order: priorityOrder,
         acceptUrl,
@@ -391,7 +397,7 @@ export class InvitationsService {
       .sendRecipientNotification({
         to: email,
         recipientName: dto.name,
-        ownerName: owner.full_name,
+        ownerName: resolveOwnerName(owner),
         signupUrl: `${this.frontendUrl}/signup?ref=recipient`,
       })
       .catch((err) => {
@@ -605,7 +611,7 @@ export class InvitationsService {
         .sendReleaseManagerInvitation({
           to: membership.invite_email,
           rmName: membership.invite_name,
-          ownerName: owner.full_name,
+          ownerName: resolveOwnerName(owner),
           ownerEmail: owner.email,
           acceptUrl,
         })
@@ -622,7 +628,7 @@ export class InvitationsService {
         .sendGuardianInvitation({
           to: membership.invite_email,
           guardianName: membership.invite_name,
-          ownerName: owner.full_name,
+          ownerName: resolveOwnerName(owner),
           rmName: null,
           order: guardian?.priority_order ?? 1,
           acceptUrl,
@@ -636,7 +642,7 @@ export class InvitationsService {
         .sendRecipientNotification({
           to: membership.invite_email,
           recipientName: membership.invite_name,
-          ownerName: owner.full_name,
+          ownerName: resolveOwnerName(owner),
           signupUrl: `${this.frontendUrl}/signup?ref=recipient`,
         })
         .catch((err) => {

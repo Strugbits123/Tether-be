@@ -1,6 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Resend } from 'resend';
+// The guardian cap appears in invitation copy — read it from the constant so the
+// email can't keep claiming "three" after the limit changes (it already had).
+import { MAX_GUARDIANS } from '../../guardians/guardians.constants.js';
 
 // Deliberately not delegated to a general-purpose HTML sanitizer: several
 // escaped values here (acceptUrl, cancelUrl, portalUrl) are interpolated
@@ -14,6 +17,19 @@ function escapeHtml(value: string | null | undefined): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+
+/**
+ * Last line of defence for the owner's name. Callers should pass a name already
+ * resolved by resolveOwnerName (shared/owner-name.util.ts), but this is the
+ * choke point every outbound email flows through, and a blank name here ships
+ * subject lines like " has chosen you as their Release Manager on Tether" —
+ * which is exactly what recipients were receiving. Never let that leave here.
+ */
+function ownerLabel(value: string | null | undefined): string {
+  const trimmed = (value ?? '').trim();
+  return trimmed || 'Your loved one';
 }
 
 @Injectable()
@@ -40,7 +56,7 @@ export class EmailService {
   }): Promise<string | null> {
     return this.send({
       to: params.to,
-      subject: `${params.ownerName} has chosen you as their Release Manager on Tether`,
+      subject: `${ownerLabel(params.ownerName)} has chosen you as their Release Manager on Tether`,
       html: this.buildRmInvitationHtml(params),
     });
   }
@@ -55,7 +71,7 @@ export class EmailService {
   }): Promise<string | null> {
     return this.send({
       to: params.to,
-      subject: `${params.ownerName} has named you as a Guardian on Tether`,
+      subject: `${ownerLabel(params.ownerName)} has named you as a Guardian on Tether`,
       html: this.buildGuardianInvitationHtml(params),
     });
   }
@@ -68,7 +84,7 @@ export class EmailService {
   }): Promise<string | null> {
     return this.send({
       to: params.to,
-      subject: `${params.ownerName} has included you in their Tether legacy plan`,
+      subject: `${ownerLabel(params.ownerName)} has included you in their Tether legacy plan`,
       html: this.buildRecipientNotificationHtml(params),
     });
   }
@@ -80,11 +96,11 @@ export class EmailService {
     acceptUrl: string;
   }): Promise<string | null> {
     const rmName = escapeHtml(params.rmName);
-    const ownerName = escapeHtml(params.ownerName);
+    const ownerName = escapeHtml(ownerLabel(params.ownerName));
     const acceptUrl = escapeHtml(params.acceptUrl);
     return this.send({
       to: params.to,
-      subject: `Reminder: ${params.ownerName} is waiting for you on Tether`,
+      subject: `Reminder: ${ownerLabel(params.ownerName)} is waiting for you on Tether`,
       html: `<div style="font-family:sans-serif;max-width:600px">
 <p>Hi ${rmName},</p>
 <p>${ownerName} is waiting for you to accept your Release Manager role on Tether. This role lets you manage the delivery of ${ownerName}'s digital legacy when the time comes.</p>
@@ -103,7 +119,7 @@ export class EmailService {
     cancelUrl: string;
     planId: string;
   }): Promise<string | null> {
-    const ownerName = escapeHtml(params.ownerName);
+    const ownerName = escapeHtml(ownerLabel(params.ownerName));
     const rmName = escapeHtml(params.rmName);
     const reason = escapeHtml(params.reason);
     const deliveryDate = escapeHtml(params.deliveryDate);
@@ -130,11 +146,11 @@ export class EmailService {
     deliveryDate: string;
   }): Promise<string | null> {
     const recipientName = escapeHtml(params.recipientName);
-    const ownerName = escapeHtml(params.ownerName);
+    const ownerName = escapeHtml(ownerLabel(params.ownerName));
     const deliveryDate = escapeHtml(params.deliveryDate);
     return this.send({
       to: params.to,
-      subject: `${params.ownerName} has left something for you`,
+      subject: `${ownerLabel(params.ownerName)} has left something for you`,
       html: `<div style="font-family:sans-serif;max-width:600px">
 <p>Hi ${recipientName},</p>
 <p>${ownerName} prepared messages, photos, and memories for you through Tether — a digital legacy platform.</p>
@@ -152,11 +168,11 @@ export class EmailService {
     portalUrl: string;
   }): Promise<string | null> {
     const recipientName = escapeHtml(params.recipientName);
-    const ownerName = escapeHtml(params.ownerName);
+    const ownerName = escapeHtml(ownerLabel(params.ownerName));
     const portalUrl = escapeHtml(params.portalUrl);
     return this.send({
       to: params.to,
-      subject: `${params.ownerName}'s legacy is ready for you`,
+      subject: `${ownerLabel(params.ownerName)}'s legacy is ready for you`,
       html: `<div style="font-family:sans-serif;max-width:600px">
 <p>Hi ${recipientName},</p>
 <p>${ownerName} prepared personal content just for you. It's now ready to view in your private Tether portal.</p>
@@ -176,13 +192,13 @@ export class EmailService {
     acceptUrl: string;
   }): Promise<string | null> {
     const guardianName = escapeHtml(params.guardianName);
-    const ownerName = escapeHtml(params.ownerName);
+    const ownerName = escapeHtml(ownerLabel(params.ownerName));
     const rmName = escapeHtml(params.rmName);
     const explanation = escapeHtml(params.explanation);
     const acceptUrl = escapeHtml(params.acceptUrl);
     return this.send({
       to: params.to,
-      subject: `Action needed: ${params.ownerName}'s Release Manager needs your help`,
+      subject: `Action needed: ${ownerLabel(params.ownerName)}'s Release Manager needs your help`,
       html: `<div style="font-family:sans-serif;max-width:600px">
 <p>Hi ${guardianName},</p>
 <p>${rmName}, the Release Manager for ${ownerName}'s Tether account, has requested that you step in to complete the release process.</p>
@@ -202,11 +218,11 @@ export class EmailService {
     reason: string;
   }): Promise<string | null> {
     const name = escapeHtml(params.name);
-    const ownerName = escapeHtml(params.ownerName);
+    const ownerName = escapeHtml(ownerLabel(params.ownerName));
     const reason = escapeHtml(params.reason);
     return this.send({
       to: params.to,
-      subject: `${params.ownerName}'s Release Plan was cancelled`,
+      subject: `${ownerLabel(params.ownerName)}'s Release Plan was cancelled`,
       html: `<div style="font-family:sans-serif;max-width:600px">
 <p>Hi ${name},</p>
 <p>The Release Plan for ${ownerName}'s Tether account has been cancelled.</p>
@@ -271,7 +287,7 @@ export class EmailService {
     acceptUrl: string;
   }): string {
     const rmName = escapeHtml(params.rmName);
-    const ownerName = escapeHtml(params.ownerName);
+    const ownerName = escapeHtml(ownerLabel(params.ownerName));
     const ownerEmail = escapeHtml(params.ownerEmail);
     const to = escapeHtml(params.to);
     const acceptUrl = escapeHtml(params.acceptUrl);
@@ -309,7 +325,7 @@ export class EmailService {
     acceptUrl: string;
   }): string {
     const guardianName = escapeHtml(params.guardianName);
-    const ownerName = escapeHtml(params.ownerName);
+    const ownerName = escapeHtml(ownerLabel(params.ownerName));
     const rmName = escapeHtml(params.rmName ?? 'their Release Manager');
     const acceptUrl = escapeHtml(params.acceptUrl);
 
@@ -319,7 +335,7 @@ export class EmailService {
 <p><strong>What this means</strong></p>
 <p>As a Guardian, you will only be contacted if ${ownerName}'s Release Manager (${rmName}) is unable to fulfill their duties. In that case, you would step in to manage the release of ${ownerName}'s digital legacy to their designated recipients.</p>
 <p>Until that happens, you have no access to ${ownerName}'s account or content. This is a standby role.</p>
-<p>${ownerName} can designate up to three Guardians. You are Guardian ${params.order}.</p>
+<p>${ownerName} can designate up to ${MAX_GUARDIANS} Guardians. You are Guardian ${params.order}.</p>
 <p><a href="${acceptUrl}">Accept Guardian Role</a></p>
 <p>— The Tether Team</p>
 </div>`;
@@ -331,7 +347,7 @@ export class EmailService {
     signupUrl: string;
   }): string {
     const recipientName = escapeHtml(params.recipientName);
-    const ownerName = escapeHtml(params.ownerName);
+    const ownerName = escapeHtml(ownerLabel(params.ownerName));
     const signupUrl = escapeHtml(params.signupUrl);
 
     return `<div style="font-family:sans-serif;max-width:600px">

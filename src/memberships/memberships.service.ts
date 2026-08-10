@@ -5,6 +5,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { SupabaseService } from '../shared/supabase/supabase.service.js';
+import { resolveOwnerName } from '../shared/owner-name.util.js';
 
 const ROLE_PERMISSIONS: Record<string, string[]> = {
   owner: [
@@ -70,7 +71,9 @@ export class MembershipsService {
         id: row.id,
         portal: row.role,
         is_self: row.account_owner_id === userId,
-        owner_name: owner?.full_name ?? null,
+        // null still means "no owner row", which the account picker renders
+        // differently from a name — only the blank-name case is filled in here.
+        owner_name: owner ? resolveOwnerName(owner, 'Account Owner') : null,
         relationship: row.relationship ?? null,
         release_active: stats.releaseActive,
         stats: {
@@ -147,7 +150,7 @@ export class MembershipsService {
     const { data, error } = await this.supabase
       .getClient()
       .from('users')
-      .select('id, full_name, email, avatar_url')
+      .select('id, full_name, first_name, last_name, email, avatar_url')
       .in('id', ownerIds);
 
     if (error) {
@@ -221,7 +224,7 @@ export class MembershipsService {
       membership_id: membership.id,
       role: membership.role,
       account_owner: owner
-        ? { id: owner.id, name: owner.full_name }
+        ? { id: owner.id, name: resolveOwnerName(owner, 'Account Owner') }
         : null,
       portal: membership.role,
       permissions: ROLE_PERMISSIONS[membership.role] ?? [],

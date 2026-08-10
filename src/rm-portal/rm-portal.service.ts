@@ -10,6 +10,7 @@ import { EmailService } from '../shared/email/email.service.js';
 import { ActivityService } from '../activity/activity.service.js';
 import { RetryEmailDto } from './dto/retry-email.dto.js';
 import { computeContentSummary, timeAgo } from './rm-portal.util.js';
+import { resolveOwnerName } from '../shared/owner-name.util.js';
 
 // activity_log event_types worth surfacing to the RM. Minor content edits
 // (autosave, reorder, transcription progress, etc.) are intentionally excluded.
@@ -42,7 +43,7 @@ export class RmPortalService {
     const { data: owner, error } = await this.supabase
       .getClient()
       .from('users')
-      .select('id, full_name, avatar_url, email')
+      .select('id, full_name, first_name, last_name, avatar_url, email')
       .eq('id', accountOwnerId)
       .single();
 
@@ -50,13 +51,9 @@ export class RmPortalService {
       throw new NotFoundException('Account owner not found');
     }
 
-    // full_name is blank for any owner who never finished their profile
-    // (first_name/last_name were never set) — fall back to their email's
-    // local part rather than showing the RM a blank name.
-    const ownerDisplayName =
-      (owner.full_name && owner.full_name.trim()) ||
-      owner.email?.split('@')[0] ||
-      'Account Owner';
+    // full_name is blank for any owner who never finished their profile — see
+    // resolveOwnerName, which is now the single place this fallback lives.
+    const ownerDisplayName = resolveOwnerName(owner, 'Account Owner');
 
     const supabase = this.supabase.getClient();
 
@@ -288,7 +285,7 @@ export class RmPortalService {
       messageId = await this.emailService.sendDeliveryEmail({
         to: newEmail,
         recipientName: recipient?.name ?? 'there',
-        ownerName: owner?.full_name ?? 'Your loved one',
+        ownerName: resolveOwnerName(owner),
         portalUrl,
       });
     } catch (err) {
